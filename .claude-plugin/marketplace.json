@@ -1,0 +1,17 @@
+{
+  "name": "spec-loop",
+  "owner": {
+    "name": "Zach McMurry"
+  },
+  "metadata": {
+    "description": "Marketplace hosting the spec-loop plugin — a spec-driven autonomous development loop for Claude Code.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "spec-loop",
+      "source": "./plugins/spec-loop",
+      "description": "Spec-driven autonomous loop — decompose one request into small targeted slices, then plan→execute→review→fix each in parallel git worktrees, surfacing to the human only on genuine ambiguity, material assumptions, or unfixable review blocks."
+    }
+  ]
+}

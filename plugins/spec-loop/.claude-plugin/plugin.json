@@ -1,0 +1,19 @@
+{
+  "name": "spec-loop",
+  "description": "Spec-driven autonomous loop — decompose one request into small targeted slices, then plan→execute→review→fix each in parallel git worktrees, surfacing to the human only on genuine ambiguity, material assumptions, or unfixable review blocks",
+  "author": {
+    "name": "Zach McMurry"
+  },
+  "version": "0.1.0",
+  "license": "MIT",
+  "homepage": "https://github.com/z2297/spec-loop",
+  "repository": "https://github.com/z2297/spec-loop",
+  "keywords": [
+    "automation",
+    "autonomous",
+    "spec-driven",
+    "workflow",
+    "code-review",
+    "worktrees"
+  ]
+}
