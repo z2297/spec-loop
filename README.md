@@ -46,16 +46,44 @@ autonomy contract, components, and limitations.
 .
 ├── .claude-plugin/
 │   └── marketplace.json     # marketplace manifest (name: spec-loop)
+├── .github/workflows/
+│   └── validate.yml         # CI gate (runs on PRs + pushes to main)
+├── scripts/
+│   └── validate_marketplace.py  # self-contained manifest validator
 ├── plugins/
 │   └── spec-loop/           # the plugin
 │       ├── .claude-plugin/plugin.json
-│       ├── commands/        # /spec-loop controller
+│       ├── commands/        # /spec-loop controller, /spec-loop:quality-gate config
 │       ├── agents/          # spec-loop-slice worker
-│       ├── skills/          # escalation-gate, review-depth-map
+│       ├── skills/          # escalation-gate, review-depth-map, quality-gate
 │       └── README.md
 ├── LICENSE
 └── README.md
 ```
+
+## Development / CI
+
+Every PR and push to `main` runs the **`validate`** check
+(`.github/workflows/validate.yml`), which fails if the marketplace or any plugin is
+structurally broken — so nothing invalid can be merged or deployed. It runs two layers,
+and passes only if **both** succeed:
+
+1. **`scripts/validate_marketplace.py`** (Python stdlib, no deps) — confirms every
+   manifest parses, required fields exist, each `source` resolves to a real plugin dir,
+   plugin names are unique and consistent with their `plugin.json`, and every
+   skill/command/agent has the required YAML frontmatter keys.
+2. **`claude plugin validate`** — the official Claude Code validator (schema + frontmatter).
+
+Run the fast layer locally before pushing:
+
+```
+python3 scripts/validate_marketplace.py .
+```
+
+**Make it a blocking gate** (one-time, GitHub UI): repo **Settings → Branches → Add
+branch ruleset** for `main` → enable **Require status checks to pass before merging** and
+add the **`validate`** check (also recommended: **Require a pull request before merging**).
+After that, a red `validate` check blocks the merge.
 
 ## License
 
