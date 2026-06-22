@@ -31,6 +31,8 @@ use `run_in_background: false`.
 - `run-id` and the absolute path to the run-state directory `docs/spec-loop/<run-id>/`.
 - `base_ref` — the integration branch to branch your worktree from (defaults to
   the branch the controller is on).
+- The absolute path to the quality-gate config
+  (`~/.claude/spec-loop/quality-gate.json`) for Step 4c.
 - Optionally, an injected human answer if you are a re-dispatch of a paused slice.
 
 ## Required sub-skills
@@ -38,6 +40,8 @@ use `run_in_background: false`.
   proceed-and-log to `decisions-log.md`; surface only on genuine ambiguity, a
   material assumption, or an unfixable review block.
 - `review-depth-map` — decides how far your review goes from your risk tier.
+- `quality-gate` — the objective, post-review quality bar (Step 4c). Reads the
+  config above; drives a bounded, behavior-preserving refactor loop.
 - `superpowers:verification-before-completion` — hard gate; never claim DONE
   without fresh test/build evidence.
 
@@ -140,6 +144,21 @@ a one-line note in `decisions-log.md`; never escalate or block on it. Step 5
 verification is the safety net — the full test/build run must still pass afterward.
 Do not skip this step; see `review-depth-map` for the rationale.
 
+### Step 4c. Quality gate (all tiers, blocking)
+After the simplify pass, run the `quality-gate` skill against this slice's diff. It
+loads the global config (`~/.claude/spec-loop/quality-gate.json`), measures the
+changed code's metrics (cyclomatic/cognitive complexity, method length, parameter
+count, nesting, class size, CRAP, plus any custom gates), and compares them to the
+configured thresholds.
+- All metrics pass → record PASS in `decisions-log.md`; proceed to Step 5.
+- Any metric fails → run the skill's **bounded, behavior-preserving refactor loop**
+  (default 3 attempts): refactor implementation only, keep tests green, re-measure.
+  This changes how the code is written, **never what it does** — no behavior, public
+  signature, or test-expectation changes.
+- Still failing after the budget → `escalation-gate` (trigger: `quality-gate-block`)
+  → write to `escalations.md` → return `NEEDS_DECISION`. Never weaken thresholds or
+  edit the config to force a pass.
+
 ### Step 5. Verify & finish
 Enforce `superpowers:verification-before-completion`: run the full test/build
 command fresh and read the output. Only with passing evidence, use
@@ -155,6 +174,7 @@ Branch: <branch>  PR: <url or n/a>
 Commits: <base7>..<head7>
 Tests: <command> → <result, e.g. 34/34 pass>
 Review: <overall recommendation after auto-fix>
+Quality: <PASS | FAIL> <key metrics vs thresholds; refactor passes used>
 Open escalations: <none | titles written to escalations.md>
 ```
 
@@ -167,5 +187,9 @@ Open escalations: <none | titles written to escalations.md>
 - Claiming DONE without fresh verification evidence.
 - Looping the auto-fix step past its budget instead of escalating.
 - Skipping the `code-simplifier` polish pass (Step 4b) before verification.
+- Skipping or weakening the quality gate (Step 4c) — e.g. editing
+  `quality-gate.json` thresholds — to make a slice pass.
+- Changing observable behavior, public signatures, or test expectations during a
+  quality-gate refactor (it is implementation-only).
 - Surfacing a decision that `escalation-gate` would resolve as proceed-and-log.
 - Editing another slice's files (dependency violations are the controller's job to prevent).

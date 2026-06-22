@@ -22,6 +22,10 @@ because you are the only layer that can interactively ask the human anything.
   (3) a review BLOCK that survived the auto-fix loop.
 - **REQUIRED SUB-SKILL:** `review-depth-map` decides how far each slice's review
   goes, based on the slice's risk tier.
+- **REQUIRED SUB-SKILL:** `quality-gate` is the objective, post-review bar each
+  slice must clear before merge. Its thresholds live in the global config at
+  `~/.claude/spec-loop/quality-gate.json`; you ensure that config exists (Phase 0)
+  and pass its path to every slice.
 - This loop **intentionally overrides** the human gates in `brainstorming` and
   `subagent-driven-development`. It does NOT override
   `superpowers:verification-before-completion`.
@@ -48,17 +52,25 @@ proceed without them.
 
 1. If `--resume <run-id>` is present, skip to **Resume** below.
 2. Parse flags: `--max-parallel` (default 5), `--risk-floor` (default 1).
-3. Restate the request in your own words (per the user's global CLAUDE.md).
-4. Explore the codebase to find reusable functions, patterns, and conventions —
+3. **Quality-gate config (one-time).** Check whether
+   `~/.claude/spec-loop/quality-gate.json` exists. If it does **not**, run the
+   first-run setup once now — follow the `/spec-loop:quality-gate` command's routine
+   to prompt the human (validate the quality level + any custom gates) and write the
+   file. **Batch this with the Phase 0 step 6 `escalation-gate` round** so the human
+   sees a single up-front interaction. If the file already exists, say nothing and
+   proceed — never re-prompt.
+4. Restate the request in your own words (per the user's global CLAUDE.md).
+5. Explore the codebase to find reusable functions, patterns, and conventions —
    launch up to 3 `Explore` agents in parallel. Prefer reuse over new code.
-5. Decompose the request into the **smallest independent slices**. A correct
+6. Decompose the request into the **smallest independent slices**. A correct
    slice boundary passes the subagent-driven-development test: *a reviewer could
    meaningfully reject one slice while approving its neighbor.* Each slice should
    be a vertical, independently shippable change.
-6. Run `escalation-gate` on the request itself. If the request is genuinely
+7. Run `escalation-gate` on the request itself. If the request is genuinely
    ambiguous or forces a material assumption about scope, batch those now and ask
-   via `AskUserQuestion` **before** spawning any work. (This is the one expected
-   up-front interaction; everything after aims to be autonomous.)
+   via `AskUserQuestion` **before** spawning any work — together with any first-run
+   quality-gate setup from step 3. (This is the one expected up-front interaction;
+   everything after aims to be autonomous.)
 
 ## Phase 1 — Build the DAG and run state
 
@@ -89,7 +101,8 @@ background dispatch to work below depth 1.
    **Dispatch them in a single message, each `run_in_background: true`**, so they
    run concurrently without blocking the terminal (per the user's saved
    preference). Pass each agent: its slice object, the `run-id`, the absolute
-   path to `docs/spec-loop/<run-id>/`, its risk tier, and `base_ref`. The worker's
+   path to `docs/spec-loop/<run-id>/`, its risk tier, `base_ref`, and the absolute
+   path to the quality-gate config (`~/.claude/spec-loop/quality-gate.json`). The worker's
    first action is to create a clean dedicated worktree from the current tip of
    `base_ref` under `.worktrees/spec-loop/<run-id>/<slice-id>` — before any other
    work.

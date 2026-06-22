@@ -66,14 +66,51 @@ Flags:
 Run state is written under `docs/spec-loop/<run-id>/` (request, slice DAG, open
 escalations, and an audit log of auto-decisions).
 
+## Quality gate
+
+After PR review and the code-simplifier polish pass — before a slice merges — each
+slice must clear an **objective code-quality gate** (slice Step 4c). It measures the
+changed code against configurable thresholds:
+
+| Metric | Default |
+|--------|---------|
+| Cyclomatic complexity (per method) | ≤ 10 |
+| Cognitive complexity (per method) | ≤ 15 |
+| Method/function length | ≤ 50 lines |
+| Parameter count | ≤ 4 |
+| Nesting depth | ≤ 3 |
+| Class/file length | ≤ 300 lines |
+| CRAP score | ≤ 30 *(needs coverage; skipped + noted if unavailable)* |
+
+Plus any **custom gates** you add (a metric threshold, or a shell command that must
+pass against the changed files).
+
+- **Measurement is hybrid:** a real analyzer is used when one is installed for the
+  project's language (e.g. `eslint` complexity, `radon`, `lizard`); otherwise the
+  language-agnostic `refactor-analysis` heuristics estimate the same metrics.
+- **On failure, the slice refactors itself** — a bounded (default 3), **behavior-
+  preserving** loop that changes implementation only and keeps tests green. If it
+  still can't comply, the slice escalates (`NEEDS_DECISION`) rather than merging.
+
+**Configure once, persists everywhere.** On the first `/spec-loop` run you're prompted
+to validate the quality level and add any custom gates; the result is saved globally
+to `~/.claude/spec-loop/quality-gate.json` and reused by every future run. You're never
+re-prompted — update it anytime with:
+
+```
+/spec-loop:quality-gate
+```
+
 ## Components
 
 | Type    | Name              | Role |
 |---------|-------------------|------|
 | command | `spec-loop`       | Controller — decompose, schedule waves, surface batched escalations |
-| agent   | `spec-loop-slice` | Per-slice worker — creates a clean dedicated worktree up front, then plan→execute→review→fix→merge inside it |
+| command | `quality-gate`    | View/update the global code-quality gate config (`/spec-loop:quality-gate`) |
+| agent   | `spec-loop-slice` | Per-slice worker — creates a clean dedicated worktree up front, then plan→execute→review→quality-gate→merge inside it |
 | skill   | `escalation-gate` | The autonomy contract |
 | skill   | `review-depth-map`| Maps a plan's risk tier to how far `review-pr` goes |
+| skill   | `quality-gate`    | Measures changed code vs thresholds; drives the behavior-preserving refactor loop |
 
 ## Notes & limitations
 

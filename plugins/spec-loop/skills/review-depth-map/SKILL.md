@@ -47,6 +47,15 @@ block the slice on it. Behavioral safety comes from Step 5 verification — the 
 test/build run must still pass after simplification, which catches any regression a
 simplification might introduce.
 
+## Quality gate (all tiers, blocking)
+
+After the simplify pass and before verification, every slice runs the `quality-gate`
+skill (slice Step 4c). Its bar is the **configured thresholds** in
+`~/.claude/spec-loop/quality-gate.json` (cyclomatic/cognitive complexity, method
+length, etc.) — **separate from and independent of** the review severity bar above.
+It is tier-independent and **blocking**: failures drive a bounded, behavior-preserving
+refactor loop, then escalate if still unmet.
+
 ## Tier assignment heuristics (use when writing the plan header)
 
 Assign Tier 3 if the slice touches ANY of: auth/permissions, secrets/credentials, database schema or migrations, money/billing, PII/security, public/exported API or types, error-handling or retry/fallback logic, concurrency.
