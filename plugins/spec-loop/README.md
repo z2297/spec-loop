@@ -8,17 +8,24 @@ when it genuinely cannot decide.
 
 ## What it does
 
+- **The Iron Council** (`iron-council`) — a five-member adversarial review body that
+  *challenges* the work before effort is spent on it. It convenes on the **user
+  request** at intake and on **every slice plan** before execution, surfacing
+  discrepancies and opinionated feedback. A majority objection (or any single safety
+  objection) deems the work *unworthy* and is lifted to you to decide.
 - **Auto-decompose** one request into the smallest independently shippable slices.
 - **Dependency-aware scheduling** — independent slices run in parallel worktrees;
   dependent slices serialize.
-- **Per slice:** `superpowers:writing-plans` → `superpowers:subagent-driven-development`
+- **Per slice:** `superpowers:writing-plans` → **Iron Council plan review**
+  (`iron-council`) → `superpowers:subagent-driven-development`
   (falls back to `executing-plans` if nested subagents aren't available) →
   `pr-review-toolkit:review-pr` scoped to the plan's risk tier → a bounded auto-fix
   loop → `superpowers:verification-before-completion` → `finishing-a-development-branch`.
 - **Autonomy contract** (`escalation-gate`): proceed-and-log by default; interrupt
-  you only on (1) genuine ambiguity, (2) a material assumption, or (3) a review
-  BLOCK that survives the auto-fix loop. Escalations are batched at wave boundaries
-  so background work never blocks your terminal.
+  you only on (1) genuine ambiguity, (2) a material assumption, (3) a review
+  BLOCK that survives the auto-fix loop, or (4) an Iron Council objection.
+  Escalations are batched at wave boundaries so background work never blocks your
+  terminal.
 
 ## Requirements (install these first)
 
@@ -66,6 +73,42 @@ Flags:
 Run state is written under `docs/spec-loop/<run-id>/` (request, slice DAG, open
 escalations, and an audit log of auto-decisions).
 
+## The Iron Council
+
+The loop's adversarial review body. Its job is not to agree — it is to **challenge
+the work before effort is spent on it**, surface discrepancies, and give
+constructive-but-opinionated feedback. It convenes at two moments:
+
+- **Intake** — on the **raw user request**, before decomposition (controller).
+- **Pre-execution** — on **every slice plan**, after planning and before any code
+  runs (slice Step 1.5).
+
+Each member is its own agent with a distinct mandate:
+
+| Member | Challenges |
+|--------|-----------|
+| `iron-council-skeptic`    | The **premise** — right problem? unstated requirements, ambiguity, XY-problems, undefined success criteria |
+| `iron-council-architect`  | The **design** — soundness, coupling, abstraction fit, error/edge paths, whether the plan's steps reach the goal |
+| `iron-council-pragmatist` | The **scope** — over-engineering, YAGNI, gold-plating, right-sizing, the simpler path |
+| `iron-council-guardian`   | The **risk** — security, secrets/PII, data integrity, migrations, breaking contracts, irreversibility, test coverage |
+| `iron-council-historian`  | **Consistency** — existing patterns, conventions, prior decisions, reuse-over-new |
+
+Each member returns `ENDORSE`, `ENDORSE_WITH_CONCERNS`, or `OBJECT`. The verdicts
+aggregate:
+
+- **Majority OBJECT (≥3/5)** — or **any single `SAFETY` OBJECT** (irreversible data
+  loss, security hole, broken public contract) — deems the work **unworthy**. It is
+  lifted to the orchestrator via `escalation-gate`'s `council-objection` trigger and
+  surfaced to **you** (batched at intake, or at the wave boundary for a plan).
+- **Lesser concerns** (`ENDORSE_WITH_CONCERNS`, minority non-safety objections) are
+  **folded into** the decomposition/plan and logged to `decisions-log.md` — they do
+  **not** interrupt you. This keeps autonomy-by-default while still lifting genuinely
+  unworthy work to a human.
+
+The council is **advisory and read-only** — members never edit code; they route
+every halt through the same batched-escalation machinery as the rest of the loop, so
+background work is never blocked.
+
 ## Quality gate
 
 After PR review and the code-simplifier polish pass — before a slice merges — each
@@ -107,7 +150,13 @@ re-prompted — update it anytime with:
 |---------|-------------------|------|
 | command | `spec-loop`       | Controller — decompose, schedule waves, surface batched escalations |
 | command | `quality-gate`    | View/update the global code-quality gate config (`/spec-loop:quality-gate`) |
-| agent   | `spec-loop-slice` | Per-slice worker — creates a clean dedicated worktree up front, then plan→execute→review→quality-gate→merge inside it |
+| agent   | `spec-loop-slice` | Per-slice worker — creates a clean dedicated worktree up front, then plan→council→execute→review→quality-gate→merge inside it |
+| agent   | `iron-council-skeptic`    | Council member — challenges the premise |
+| agent   | `iron-council-architect`  | Council member — challenges the design |
+| agent   | `iron-council-pragmatist` | Council member — challenges the scope |
+| agent   | `iron-council-guardian`   | Council member — challenges the risk |
+| agent   | `iron-council-historian`  | Council member — challenges consistency with the codebase |
+| skill   | `iron-council`    | Convenes the council, aggregates verdicts, routes objections to `escalation-gate` |
 | skill   | `escalation-gate` | The autonomy contract |
 | skill   | `review-depth-map`| Maps a plan's risk tier to how far `review-pr` goes |
 | skill   | `quality-gate`    | Measures changed code vs thresholds; drives the behavior-preserving refactor loop |

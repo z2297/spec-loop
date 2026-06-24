@@ -39,6 +39,10 @@ use `run_in_background: false`.
 - `escalation-gate` — run before stopping or assuming anything. Default is
   proceed-and-log to `decisions-log.md`; surface only on genuine ambiguity, a
   material assumption, or an unfixable review block.
+- `iron-council` — convene the five-member council on your plan **after writing it
+  and before executing it** (Step 1.5). A council OBJECT means the plan is unworthy
+  as written → escalate (`council-objection`) and return `NEEDS_DECISION`; lesser
+  concerns get folded into the plan and logged.
 - `review-depth-map` — decides how far your review goes from your risk tier.
 - `quality-gate` — the objective, post-review quality bar (Step 4c). Reads the
   config above; drives a bounded, behavior-preserving refactor loop.
@@ -97,6 +101,25 @@ whole request. Keep it small: bite-sized TDD steps, no placeholders.
 Then prepend the `review-depth-map` metadata header recording your risk tier,
 the exact `review-pr` command, the `simplify` command
 (`pr-review-toolkit:review-pr simplify`), the blocking bar, and the surface touched.
+
+### Step 1.5. Iron Council plan review (before any execution)
+Before you execute a single task, convene the Iron Council on the plan you just
+wrote. Invoke the `iron-council` skill and dispatch all five members
+(`iron-council-skeptic`, `-architect`, `-pragmatist`, `-guardian`, `-historian`)
+in a **single message**, passing each the plan file, the slice object, and the
+run-state directory. **Because you are a subagent, dispatch every member with
+`run_in_background: false`** (one message of synchronous Task calls still runs them
+concurrently). Aggregate per the skill:
+- **Council OBJECT** (majority object, or any `SAFETY` OBJECT) → the plan is unworthy
+  as written. Do **not** execute it. Run `escalation-gate` (trigger:
+  `council-objection`), write the objection to `escalations.md` using the skill's
+  council-objection entry shape, and return **`NEEDS_DECISION`** so the controller
+  lifts it to the human. (On re-dispatch with the human's answer, apply the
+  resolution and skip re-convening — the human has already adjudicated.)
+- **ENDORSE_WITH_CONCERNS** → revise the plan to fold in the concrete, cheap
+  concerns (reuse an existing helper, drop gold-plating, add a risky-path test,
+  match a convention), log what changed to `decisions-log.md`, then proceed.
+- **ENDORSE** → log one line and proceed.
 
 ### Step 2. Execute (task-by-task)
 Prefer `superpowers:subagent-driven-development`: dispatch a fresh implementer
@@ -172,6 +195,7 @@ return a short status to the controller:
 SLICE <slice-id>: <DONE | NEEDS_DECISION | BLOCKED>
 Branch: <branch>  PR: <url or n/a>
 Commits: <base7>..<head7>
+Council: <ENDORSE | ENDORSE_WITH_CONCERNS | OBJECT> <n/5; folded concerns or objecting members>
 Tests: <command> → <result, e.g. 34/34 pass>
 Review: <overall recommendation after auto-fix>
 Quality: <PASS | FAIL> <key metrics vs thresholds; refactor passes used>
@@ -184,6 +208,10 @@ Open escalations: <none | titles written to escalations.md>
 - Wiping an existing worktree on a resume/re-dispatch that has committed progress.
 - Working on `main`/`master`, or outside your worktree.
 - Writing a plan that covers more than this one slice.
+- Executing a plan before the Iron Council has reviewed it (Step 1.5), or executing
+  one the council OBJECTED to instead of escalating.
+- Halting on a council ENDORSE_WITH_CONCERNS instead of folding the concerns in and
+  proceeding (object-only halts).
 - Claiming DONE without fresh verification evidence.
 - Looping the auto-fix step past its budget instead of escalating.
 - Skipping the `code-simplifier` polish pass (Step 4b) before verification.

@@ -31,12 +31,13 @@ Log format (one line each, append-only):
 [<slice-id>] DECISION: <what was decided> — RATIONALE: <evidence/convention> — REVERSIBILITY: <trivial|moderate>
 ```
 
-### SURFACE to human (only these three triggers)
+### SURFACE to human (only these four triggers)
 Do NOT act. Write an escalation entry (format below) and return control:
 
 1. **Genuine ambiguity** — there are ≥2 valid interpretations that materially change scope or behavior, and the codebase/spec cannot resolve which is intended.
 2. **Material assumption** — you would be assuming something non-trivial that affects behavior, scope, public contracts, persisted data, security, or external integrations. (Per the user's global CLAUDE.md, material assumptions must be stated and confirmed — not silently made.)
 3. **Unfixable review BLOCK** — `review-pr` still returns BLOCK MERGE after the auto-fix loop has exhausted its attempt budget.
+4. **Council objection** — the `iron-council` deems a request or plan **unworthy**: a majority of members OBJECT, or any single member raises a `SAFETY` OBJECT (irreversible data loss, security hole, broken public contract). Lesser council concerns (ENDORSE_WITH_CONCERNS, minority non-safety objections) are folded in and logged — they do **not** surface.
 
 When uncertain whether something is "material": if a reasonable reviewer could reject the slice over it, it is material → surface it.
 
@@ -53,7 +54,7 @@ When uncertain whether something is "material": if a reasonable reviewer could r
 Append to `escalations.md`:
 ```
 ## [<slice-id>] <short title>   (status: OPEN)
-- Trigger: <ambiguity | material-assumption | review-block>
+- Trigger: <ambiguity | material-assumption | review-block | council-objection>
 - Context: <what the loop was doing and why it cannot decide>
 - The decision: <the precise question>
 - Options:

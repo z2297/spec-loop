@@ -22,6 +22,14 @@ because you are the only layer that can interactively ask the human anything.
   (3) a review BLOCK that survived the auto-fix loop.
 - **REQUIRED SUB-SKILL:** `review-depth-map` decides how far each slice's review
   goes, based on the slice's risk tier.
+- **REQUIRED SUB-SKILL:** `iron-council` convenes a five-member adversarial council
+  that challenges the work before effort is spent on it — once on the **user
+  request** at intake (you run this), and once on **every slice plan** before
+  execution (the slice worker runs this). The council surfaces discrepancies and
+  returns opinionated verdicts; a majority OBJECT (or any single `SAFETY` OBJECT)
+  means the work is **unworthy as proposed** and is lifted to you (the orchestrator)
+  to prompt the human — via `escalation-gate`'s `council-objection` trigger. Lesser
+  concerns are folded into the decomposition/plan and logged, never surfaced.
 - **REQUIRED SUB-SKILL:** `quality-gate` is the objective, post-review bar each
   slice must clear before merge. Its thresholds live in the global config at
   `~/.claude/spec-loop/quality-gate.json`; you ensure that config exists (Phase 0)
@@ -62,15 +70,30 @@ proceed without them.
 4. Restate the request in your own words (per the user's global CLAUDE.md).
 5. Explore the codebase to find reusable functions, patterns, and conventions —
    launch up to 3 `Explore` agents in parallel. Prefer reuse over new code.
-6. Decompose the request into the **smallest independent slices**. A correct
-   slice boundary passes the subagent-driven-development test: *a reviewer could
-   meaningfully reject one slice while approving its neighbor.* Each slice should
-   be a vertical, independently shippable change.
-7. Run `escalation-gate` on the request itself. If the request is genuinely
-   ambiguous or forces a material assumption about scope, batch those now and ask
-   via `AskUserQuestion` **before** spawning any work — together with any first-run
-   quality-gate setup from step 3. (This is the one expected up-front interaction;
-   everything after aims to be autonomous.)
+6. **Convene the Iron Council on the request (intake).** Before decomposing,
+   invoke the `iron-council` skill and dispatch all five members
+   (`iron-council-skeptic`, `-architect`, `-pragmatist`, `-guardian`,
+   `-historian`) on the **verbatim user request**, in a single message so they
+   deliberate concurrently. Aggregate their verdicts per the skill:
+   - **Council OBJECT** (majority object, or any `SAFETY` OBJECT) → the request is
+     unworthy as posed. Run `escalation-gate` (trigger: `council-objection`) and add
+     the objection to the **up-front batched question round** in step 8 — do not
+     decompose or schedule until the human resolves it.
+   - **ENDORSE_WITH_CONCERNS** → fold the concrete concerns into how you decompose
+     (split/merge slices, drop gold-plating, reuse existing code, harden risky
+     paths) and log them to `decisions-log.md`.
+   - **ENDORSE** → proceed; log one line.
+7. Decompose the request into the **smallest independent slices**, incorporating the
+   council's intake feedback. A correct slice boundary passes the
+   subagent-driven-development test: *a reviewer could meaningfully reject one slice
+   while approving its neighbor.* Each slice should be a vertical, independently
+   shippable change.
+8. Run `escalation-gate` on the request itself. If the request is genuinely
+   ambiguous, forces a material assumption about scope, **or the Iron Council
+   objected in step 6**, batch those now and ask via `AskUserQuestion` **before**
+   spawning any work — together with any first-run quality-gate setup from step 3.
+   (This is the one expected up-front interaction; everything after aims to be
+   autonomous.)
 
 ## Phase 1 — Build the DAG and run state
 
