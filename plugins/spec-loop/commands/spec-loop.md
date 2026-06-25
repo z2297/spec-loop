@@ -7,9 +7,12 @@ allowed-tools: ["Bash", "Glob", "Grep", "Read", "Task", "AskUserQuestion"]
 # Spec-Loop — autonomous spec-driven development loop
 
 You are the **controller** for a spec-driven loop. You take one feature request,
-decompose it into small targeted slices, and drive each slice through
+decompose it into targeted slices, and drive each slice through
 plan → execute → scoped review → auto-fix → merge — running independent slices
-in parallel git worktrees as background agents. You run in the **main session**
+in parallel git worktrees as background agents. Slices that turn out too big
+**split** themselves back into the DAG (dynamic decomposition), so your initial cut
+can be coarse; once every slice lands, an **integration gate** (Phase 5) verifies the
+assembled whole before the run is called complete. You run in the **main session**
 because you are the only layer that can interactively ask the human anything.
 
 **Request / arguments:** "$ARGUMENTS"
@@ -83,11 +86,17 @@ proceed without them.
      (split/merge slices, drop gold-plating, reuse existing code, harden risky
      paths) and log them to `decisions-log.md`.
    - **ENDORSE** → proceed; log one line.
-7. Decompose the request into the **smallest independent slices**, incorporating the
-   council's intake feedback. A correct slice boundary passes the
-   subagent-driven-development test: *a reviewer could meaningfully reject one slice
-   while approving its neighbor.* Each slice should be a vertical, independently
-   shippable change.
+7. Decompose the request into independent slices, incorporating the council's intake
+   feedback. A correct slice boundary passes the subagent-driven-development test:
+   *a reviewer could meaningfully reject one slice while approving its neighbor.* Each
+   slice should be a vertical, independently shippable change.
+   - **You do not have to find the finest cut up front.** Slice workers refine their
+     own slices via dynamic decomposition (slice Step 1.6): a slice that turns out to
+     be two-or-more shippable changes returns `SPLIT` with a sub-decomposition you
+     ingest in Phase 3. For large or fuzzy requests, prefer cutting at the first
+     boundaries you are *confident* are independent and let the workers split deeper —
+     this is cheaper and more accurate than guessing a fine-grained DAG before any
+     code exists. Reserve aggressive upfront splitting for boundaries you are sure of.
 8. Run `escalation-gate` on the request itself. If the request is genuinely
    ambiguous, forces a material assumption about scope, **or the Iron Council
    objected in step 6**, batch those now and ask via `AskUserQuestion` **before**
@@ -104,7 +113,7 @@ proceed without them.
    using-git-worktrees skill verifies and adds it, but check.)
 3. Create `docs/spec-loop/<run-id>/` and write:
    - `request.md` — the original request, verbatim.
-   - `dag.json` — `{ base_ref, base_sha, slices: [...] }` where each slice is `{id, goal, files, subsystems, deps:[ids], risk_tier:1|2|3, status:"pending"}`. Apply `--risk-floor` as the minimum tier. Assign tiers using `review-depth-map` heuristics.
+   - `dag.json` — `{ base_ref, base_sha, slices: [...] }` where each slice is `{id, goal, files, subsystems, deps:[ids], risk_tier:1|2|3, depth:0, parent:null, status:"pending"}`. Apply `--risk-floor` as the minimum tier. Assign tiers using `review-depth-map` heuristics. `depth` tracks split generation (intake slices = `0`); `parent` links a split child to the slice it came from. `status` may also become the terminal value `"split"` (Phase 3) when a slice is replaced by its children.
    - `escalations.md` — start empty (header only).
    - `decisions-log.md` — start empty (header only).
 4. Sanity-check the DAG: no cycles, every `deps` id exists. If a cycle exists, that is a decomposition error — fix it yourself (collapse the cyclic slices into one) and log it.
@@ -142,32 +151,97 @@ background dispatch to work below depth 1.
 
 1. When the wave's background agents report, read each slice's returned status:
    - `DONE` → set the slice `status:"complete"` in `dag.json`.
+   - `SPLIT` → the slice is two-or-more shippable changes; ingest its children (step 3).
    - `NEEDS_DECISION` → leave it `pending`; its escalation is in `escalations.md`.
    - `BLOCKED` → leave it `pending`; treat its blocker as an escalation too.
 2. Verify each `DONE` claim independently before trusting it
    (`superpowers:verification-before-completion`): check the worktree's git log /
    diff and test evidence in the slice's report. If a slice claims DONE without
    evidence, treat it as `NEEDS_DECISION`.
-3. Collect ALL `OPEN` entries from `escalations.md` and surface them as ONE
+3. **Ingest splits (dynamic decomposition).** For each slice that returned `SPLIT`,
+   read its proposed sub-decomposition at `docs/spec-loop/<run-id>/slice-<id>-split.json`
+   and graft the children into `dag.json`:
+   - Insert each child as a `pending` slice with id `<parent-id>.1`, `<parent-id>.2`, …,
+     `depth = parent.depth + 1`, `parent = <parent-id>`. Carry the child's
+     `files`/`subsystems`/`goal` from the proposal; assign each child a `risk_tier`
+     via `review-depth-map` heuristics (never below `--risk-floor`).
+   - **deps:** children inherit the parent's external `deps`. Translate each child's
+     `internal_deps` indices into the sibling child ids and add them.
+   - **Rewrite dependents:** every other slice that listed the parent in its `deps`
+     now depends on **all** of the parent's children instead (replace the parent id
+     with the full set of child ids).
+   - Mark the parent `status:"split"` (terminal — not counted as incomplete).
+   - Re-run the Phase 1 sanity check (no cycles, every `deps` id exists), then append
+     one line to `decisions-log.md` recording the graft. The children schedule in
+     later waves like any `pending` slice — no special wave logic.
+4. **Per-wave integration check (lightweight).** After this wave's `DONE` slices have
+   merged into `base_ref` (their Step 5 `finishing-a-development-branch`), run the
+   project's full test/build **fresh on `base_ref`** and read the output
+   (`superpowers:verification-before-completion` discipline). This catches same-wave
+   merge incompatibilities and cross-slice drift *early*, while remediation is cheap —
+   two slices in one wave both branched from the same tip and merged blind to each
+   other. Green → continue. Red → open a **remediation slice** (Phase 5's procedure)
+   for the failure and schedule it; do not advance as if the wave were clean.
+5. Collect ALL `OPEN` entries from `escalations.md` and surface them as ONE
    batched `AskUserQuestion` round (one question per escalation, with the
    recommended default first). Do not ask one-at-a-time across waves.
-4. Write the human's answers back into `escalations.md` (set `status: ANSWERED`)
+6. Write the human's answers back into `escalations.md` (set `status: ANSWERED`)
    and re-dispatch each answered slice via a fresh `spec-loop-slice` agent with
    the answer injected into its prompt.
 
 ## Phase 4 — Loop
 
-Repeat Phases 2–3 until every slice in `dag.json` is `complete`. Then produce a
-final summary:
-- Slices completed, with branch/PR for each.
-- The `decisions-log.md` (auto-decisions made on the human's behalf).
+Repeat Phases 2–3 until every slice in `dag.json` is terminal — `complete` or
+`split` (a split parent is replaced by its children, which must themselves reach
+`complete`). Slices left `pending` because of an open escalation block the run until
+answered. Once every slice is terminal, proceed to Phase 5.
+
+## Phase 5 — Integration gate (verify the assembled whole)
+
+Each slice merged after passing *its own* tests in *its own* worktree — but nothing
+has yet verified the slices **together**. This phase does, before the run is called
+complete. (Analogous to a cross-phase integration check.)
+
+1. **Full test/build on `base_ref`.** Run the project's complete test and build
+   suite fresh on `base_ref` (which now contains every merged slice) and read the
+   output. This is the assembled whole, not any single slice's worktree.
+2. **Cross-slice integration review.** Run ONE synchronous `pr-review-toolkit:review-pr`
+   over the **cumulative diff** `base_sha..HEAD` of `base_ref`, at the run's **highest
+   slice risk tier** (via `review-depth-map`). Scope it to integration concerns:
+   contract consistency across slices (a signature one slice changed and another
+   calls), wiring, and end-to-end flows that span slices — the failures a per-slice
+   review structurally cannot see.
+3. **Remediate (bar unchanged).** If steps 1–2 surface failures:
+   - Create a **remediation slice** — a normal `pending` slice in `dag.json`
+     (`depth:0`, `parent:null`, risk tier = run max, `deps` = all completed slices)
+     whose goal is to fix the specific integration failure — and dispatch it through
+     a fresh `spec-loop-slice` like any other slice. It runs the same plan → execute →
+     review → quality-gate → verify → merge loop with the same bounded auto-fix.
+   - Re-run Phase 5 after the remediation slice merges.
+   - Only if a remediation slice itself exhausts its bounded loop and returns
+     `NEEDS_DECISION` does this reach the human — through the **existing**
+     `escalation-gate` (`review-block`) at the next wave boundary. No new trigger;
+     the bar is exactly the per-slice bar applied to the whole.
+4. **PR-mode variant.** If slices opened PRs instead of merging to `base_ref`
+   (their `finishing-a-development-branch` chose PR), there is no merged base to test.
+   Build a **throwaway integration branch** off `base_sha`, merge every completed
+   slice branch into it, run steps 1–2 there, report the integration status, then
+   delete the branch — leaving the PRs untouched for the human to merge. (Merge-to-
+   `base_ref` is the primary path; this is the fallback.)
+
+When Phase 5 is green, produce the **final summary**:
+- Slices completed, with branch/PR for each (note any `split` parents and their children).
+- The `decisions-log.md` (auto-decisions made on the human's behalf, including splits).
+- Integration gate result (suite + cross-slice review; any remediation slices added).
 - Any slices that remain blocked and why.
 
 ## Resume
 
-For `--resume <run-id>`: read `docs/spec-loop/<run-id>/dag.json`, skip all
-`complete` slices, drain any `ANSWERED` escalations into re-dispatches, and
-continue from the first wave that has runnable slices.
+For `--resume <run-id>`: read `docs/spec-loop/<run-id>/dag.json`, skip all terminal
+slices (`complete` and `split` parents), drain any `ANSWERED` escalations into
+re-dispatches, and continue from the first wave that has runnable slices. If every
+slice is already terminal, go straight to the Phase 5 integration gate before
+declaring the run done.
 
 ## Guardrails
 - Never dispatch two implementer-level agents that touch the same files

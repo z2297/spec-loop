@@ -41,6 +41,11 @@ Do NOT act. Write an escalation entry (format below) and return control:
 
 When uncertain whether something is "material": if a reasonable reviewer could reject the slice over it, it is material → surface it.
 
+### Not triggers (autonomous by design)
+These look like stopping points but are **not** surfaced — they are handled by the loop itself, keeping the bar at exactly the four triggers above:
+- **Slice split (dynamic decomposition).** A slice that turns out to be two-or-more independently shippable changes returns `SPLIT` with a sub-decomposition the controller grafts into the DAG (slice Step 1.6). Autonomous, logged to `decisions-log.md`, no human contact. Only an oversized slice already at the split-depth cap falls back to a trigger above (material assumption / council objection).
+- **Integration remediation.** When the per-wave check or the Phase 5 integration gate finds a cross-slice failure, the controller opens a remediation slice and fixes it through the normal slice loop. The human is reached only if that remediation slice itself exhausts its bounded auto-fix loop — i.e. via trigger 3 (unfixable review BLOCK), unchanged.
+
 ## Batching rule (critical for non-blocking operation)
 
 **Never interrupt mid-wave, once per item.** Background slice workers cannot prompt the human directly. So:

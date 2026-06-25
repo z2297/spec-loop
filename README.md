@@ -2,7 +2,7 @@
 
 A Claude Code **plugin marketplace** hosting the **spec-loop** plugin — a spec-driven
 **autonomous development loop**. Give it one feature request; it decomposes the work
-into small targeted slices, then drives each slice through
+into targeted slices, then drives each slice through
 **plan → execute → scoped review → auto-fix → merge**, running independent slices in
 parallel git worktrees as background agents, and surfaces to you **only** when it
 genuinely cannot decide.
@@ -10,6 +10,11 @@ genuinely cannot decide.
 Before any work begins, an adversarial **Iron Council** of five agents challenges the
 request and every slice plan — surfacing discrepancies and lifting genuinely unworthy
 work to you, while folding lesser concerns in and continuing.
+
+Built for **larger work items**: the initial decomposition can be coarse because any
+slice that turns out too big **splits itself** back into the plan mid-run (dynamic
+decomposition), and once every slice lands an **integration gate** verifies the
+assembled whole before the run is called complete — both fully autonomous.
 
 ## Install
 

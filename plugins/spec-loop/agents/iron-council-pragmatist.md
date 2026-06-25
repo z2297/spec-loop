@@ -40,6 +40,12 @@ edit anything. You return one structured verdict (format below).
   gold-plating, a speculative abstraction nobody asked for, or a slice sized so
   badly it should be split or merged before execution. (You rarely mark `SAFETY` —
   scope bloat is not a safety blocker.)
+- **When the flaw is that the slice is too big** (two-or-more independently shippable
+  changes), make the split actionable: in FEEDBACK, enumerate the concrete shippable
+  pieces you would cut it into (a goal + the files/area each touches, and which
+  piece must land before another). The slice worker turns this into an autonomous
+  `SPLIT` (it is not lifted to the human at pre-execution), so a vague "this is too
+  big" is far less useful than "split into: (1) …, (2) … which depends on (1)."
 - **ENDORSE_WITH_CONCERNS** when the work is roughly right but a piece could be
   trimmed or deferred and folded out of the plan.
 - **ENDORSE** when the scope is lean and proportionate to the value. Do not
