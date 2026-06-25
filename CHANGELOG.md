@@ -23,6 +23,7 @@ prior build. Pinned entries map to git tags `v<version>`.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-06-25
 ### Added
 - Stable / beta / alpha release channels and a pinned version archive, all served
   from the single `z2297/spec-loop` marketplace.
@@ -50,7 +51,8 @@ prior build. Pinned entries map to git tags `v<version>`.
 - Post-review code-quality gate: an objective complexity/length/CRAP metric gate
   with a bounded, behavior-preserving refactor loop before merge.
 
-[Unreleased]: https://github.com/z2297/spec-loop/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/z2297/spec-loop/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/z2297/spec-loop/releases/tag/v1.0.0
 [0.4.0]: https://github.com/z2297/spec-loop/releases/tag/v0.4.0
 [0.3.0]: https://github.com/z2297/spec-loop/releases/tag/v0.3.0
 [0.2.0]: https://github.com/z2297/spec-loop/releases/tag/v0.2.0

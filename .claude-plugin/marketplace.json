@@ -34,6 +34,16 @@
       "description": "ALPHA channel — bleeding edge, may be unstable. Tracks the `alpha` branch."
     },
     {
+      "name": "spec-loop-1-0-0",
+      "source": {
+        "source": "git-subdir",
+        "url": "z2297/spec-loop",
+        "path": "plugins/spec-loop",
+        "ref": "v1.0.0"
+      },
+      "description": "ARCHIVE — spec-loop v1.0.0, pinned. Install to roll back to this exact release."
+    },
+    {
       "name": "spec-loop-0-4-0",
       "source": {
         "source": "git-subdir",
