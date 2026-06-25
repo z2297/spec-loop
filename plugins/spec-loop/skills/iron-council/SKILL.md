@@ -118,6 +118,24 @@ folded change and proceed (do **not** halt):
 Concerns that are real but out of this slice's scope are logged as DEFERRED, not
 silently dropped.
 
+### Special case (pre-execution only): "split into N shippable pieces"
+A right-sizing finding that the **slice plan is two-or-more independently shippable
+changes** — raised by the Pragmatist or Architect, whether as a concern or an
+OBJECT — is **not** folded-and-crammed and is **not** lifted to the human. It routes
+to **dynamic decomposition**: the slice worker returns `SPLIT` with a sub-decomposition
+the controller grafts into the DAG (slice Step 1.6; controller Phase 3). This is
+autonomous and logged, never an escalation.
+- This applies only at **pre-execution** (the council is reviewing a plan, and there
+  is a slice worker to act on it). It does **not** apply at **intake** — at intake the
+  controller is still free to cut the request into more slices itself, so a right-sizing
+  concern there folds into the decomposition normally.
+- It only short-circuits the size dimension. Any *other* objection in the same round
+  (a SAFETY blocker, a design flaw, a wrong premise) aggregates and routes normally
+  per the rules below — a split does not paper over a real objection.
+- If the slice is already at the split-depth cap (`depth == MAX_SPLIT_DEPTH`) and is
+  *still* oversized, it can no longer split: the right-sizing OBJECT then aggregates
+  and routes to the human like any other objection (unchanged bar).
+
 ### Council OBJECT → lift to the human (never decided autonomously)
 The council has deemed the work **unworthy**. Run `escalation-gate` with trigger
 `council-objection` and write an escalation entry. **The decision belongs to the

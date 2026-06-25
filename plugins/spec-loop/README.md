@@ -13,9 +13,17 @@ when it genuinely cannot decide.
   request** at intake and on **every slice plan** before execution, surfacing
   discrepancies and opinionated feedback. A majority objection (or any single safety
   objection) deems the work *unworthy* and is lifted to you to decide.
-- **Auto-decompose** one request into the smallest independently shippable slices.
+- **Auto-decompose** one request into independently shippable slices.
+- **Dynamic decomposition** — the initial cut can be coarse: a slice that turns out
+  to be two-or-more shippable changes **splits itself** back into the DAG mid-run
+  (autonomous, depth-capped), so large or fuzzy requests don't need a perfect
+  fine-grained plan before any code exists.
 - **Dependency-aware scheduling** — independent slices run in parallel worktrees;
   dependent slices serialize.
+- **Integration gate** — once every slice lands, a final pass verifies the *assembled
+  whole* (full suite on the integration base + a cross-slice review of the cumulative
+  diff), catching contract drift and same-wave merge incompatibilities that a
+  per-slice review structurally can't see. Failures are remediated by a normal slice.
 - **Per slice:** `superpowers:writing-plans` → **Iron Council plan review**
   (`iron-council`) → `superpowers:subagent-driven-development`
   (falls back to `executing-plans` if nested subagents aren't available) →
@@ -49,6 +57,15 @@ Optional, used only for high-risk (Tier 3) reviews: a plugin providing
 /plugin marketplace add z2297/spec-loop
 /plugin install spec-loop@spec-loop
 ```
+
+**Channels & previous versions** — one marketplace serves stable plus pre-release
+channels and a pinned archive of every past release:
+```
+/plugin install spec-loop-beta@spec-loop      # beta  — release candidates
+/plugin install spec-loop-alpha@spec-loop     # alpha — bleeding edge
+/plugin install spec-loop-0-3-0@spec-loop     # pin/roll back to v0.3.0 (dashes, not dots)
+```
+See the [CHANGELOG](../../CHANGELOG.md) for the full version history and channel table.
 
 **Quick / offline (no marketplace):**
 ```
@@ -133,6 +150,28 @@ What happens:
   full machinery: flags, tiered review, the council's hard stop, batched escalation, and
   resume.
 
+### Large — a coarse request that splits itself, then an integration gate
+
+```
+/spec-loop "Add a billing module: usage metering, monthly invoice generation, and a customer billing dashboard"
+```
+
+What happens:
+- Decomposes into a **coarse** first cut — say three slices (metering, invoicing,
+  dashboard) — without over-thinking the fine boundaries.
+- When the **invoicing** slice plans its work, the **Pragmatist** flags it as two
+  independently shippable changes (invoice *data model + generation* vs. *PDF/email
+  delivery*). The slice returns **`SPLIT`**; the controller grafts the two children
+  into the DAG, rewires the dashboard's dependency onto both, and schedules them — all
+  **autonomously**, logged to `decisions-log.md`, **no interruption**.
+- After the final wave merges, the **integration gate** (Phase 5) runs the full suite
+  on the integration base and a cross-slice review of the cumulative diff. It catches
+  that the dashboard calls an invoice field the split renamed; the loop opens a small
+  **remediation slice**, fixes it, and re-verifies — still no human contact.
+- You get a summary noting the split parent, its children, and the integration result.
+  Illustrates **longer autonomous runs on larger work**: coarse-in, self-refining,
+  whole verified — with the escalation bar unchanged.
+
 ## The Iron Council
 
 The loop's adversarial review body. Its job is not to agree — it is to **challenge
@@ -208,9 +247,9 @@ re-prompted — update it anytime with:
 
 | Type    | Name              | Role |
 |---------|-------------------|------|
-| command | `spec-loop`       | Controller — decompose, schedule waves, surface batched escalations |
+| command | `spec-loop`       | Controller — decompose, schedule waves, ingest splits, run the integration gate, surface batched escalations |
 | command | `quality-gate`    | View/update the global code-quality gate config (`/spec-loop:quality-gate`) |
-| agent   | `spec-loop-slice` | Per-slice worker — creates a clean dedicated worktree up front, then plan→council→execute→review→quality-gate→merge inside it |
+| agent   | `spec-loop-slice` | Per-slice worker — creates a clean dedicated worktree up front, then plan→council→(split if too big)→execute→review→quality-gate→merge inside it |
 | agent   | `iron-council-skeptic`    | Council member — challenges the premise |
 | agent   | `iron-council-architect`  | Council member — challenges the design |
 | agent   | `iron-council-pragmatist` | Council member — challenges the scope |
@@ -244,6 +283,13 @@ re-prompted — update it anytime with:
 - This loop intentionally overrides the human approval gates in `brainstorming`
   and `subagent-driven-development`. `verification-before-completion` is kept as a
   hard, no-human gate.
+- **Dynamic decomposition is depth-capped:** a slice may split at most twice
+  (`MAX_SPLIT_DEPTH = 2`). A slice still oversized at the cap stops splitting and
+  falls back to the normal escalation path — splits never become a new way to
+  interrupt you.
+- **Integration gate runs on the merge base.** If slices opened PRs instead of
+  merging, it verifies on a throwaway integration branch and reports, leaving the PRs
+  for you to merge.
 
 ## License
 

@@ -27,7 +27,9 @@ correct here. If you ever catch yourself about to background a sub-agent, stop a
 use `run_in_background: false`.
 
 ## Inputs (provided in your dispatch prompt)
-- The slice object: `{id, goal, files, subsystems, deps, risk_tier}`.
+- The slice object: `{id, goal, files, subsystems, deps, risk_tier, depth, parent}`.
+  `depth` is the split generation (intake slices = `0`); `parent` is the slice you
+  were split from (or `null`). These bound dynamic decomposition (Step 1.6).
 - `run-id` and the absolute path to the run-state directory `docs/spec-loop/<run-id>/`.
 - `base_ref` — the integration branch to branch your worktree from (defaults to
   the branch the controller is on).
@@ -121,6 +123,35 @@ concurrently). Aggregate per the skill:
   match a convention), log what changed to `decisions-log.md`, then proceed.
 - **ENDORSE** → log one line and proceed.
 
+### Step 1.6. Right-size: split if too big (before any execution)
+A coarse intake decomposition is expected — the controller cuts the request at its
+first confident boundaries and trusts you to refine. So once you have a plan and the
+council has reviewed it, judge whether this slice is genuinely **two or more
+independently shippable changes** (a reviewer could accept one and reject another).
+The signal usually comes from the council's right-sizing finding — the Pragmatist or
+Architect calling for a split — or from your own planning.
+
+If it is too big **and `depth < MAX_SPLIT_DEPTH` (cap = `2`)**:
+- Write your proposed sub-decomposition to
+  `docs/spec-loop/<run-id>/slice-<slice-id>-split.json` — a JSON array of children,
+  each `{goal, files, subsystems, internal_deps}` where `internal_deps` lists the
+  **1-based indices** of sibling children in the same array that must complete first
+  (`[]` if none). Keep children to the smallest independently shippable cuts.
+- Append one line to `decisions-log.md`:
+  `[<slice-id>] SPLIT into <n> slices — RATIONALE: <why one slice can't ship this> — children: <goals>`.
+- **Do not execute.** Return status **`SPLIT`** (Step 6). The controller ingests the
+  children into the DAG and schedules them. This is **autonomous** — no escalation,
+  no human contact.
+
+If the slice is too big **but `depth == MAX_SPLIT_DEPTH`** (already split twice and
+still oversized): do **not** split further. Fall through to the existing machinery —
+the council's right-sizing OBJECT or `escalation-gate` (material assumption) — and
+return `NEEDS_DECISION`. This is the only path that reaches the human, and it uses
+**today's** bar unchanged. A split is never an escalation; an unsplittable oversized
+slice is the same escalation it has always been.
+
+If the slice is correctly sized, proceed to Step 2.
+
 ### Step 2. Execute (task-by-task)
 Prefer `superpowers:subagent-driven-development`: dispatch a fresh implementer
 subagent per task, with per-task spec+quality review and fix loops. That skill
@@ -190,7 +221,13 @@ branch.
 
 ### Step 6. Report (≤ 15 lines)
 Write a full report to `docs/spec-loop/<run-id>/slice-<slice-id>-report.md`, then
-return a short status to the controller:
+return a short status to the controller.
+
+**If you split (Step 1.6),** skip the slice fields below and return just:
+```
+SLICE <slice-id>: SPLIT into <n> — proposal: slice-<slice-id>-split.json
+```
+Otherwise return:
 ```
 SLICE <slice-id>: <DONE | NEEDS_DECISION | BLOCKED>
 Branch: <branch>  PR: <url or n/a>
@@ -210,6 +247,10 @@ Open escalations: <none | titles written to escalations.md>
 - Writing a plan that covers more than this one slice.
 - Executing a plan before the Iron Council has reviewed it (Step 1.5), or executing
   one the council OBJECTED to instead of escalating.
+- Executing a plan you have judged splittable while `depth < MAX_SPLIT_DEPTH`
+  instead of returning `SPLIT` (Step 1.6) — or treating a split as an escalation
+  (it is autonomous; only an unsplittable oversized slice at the depth cap reaches
+  the human).
 - Halting on a council ENDORSE_WITH_CONCERNS instead of folding the concerns in and
   proceeding (object-only halts).
 - Claiming DONE without fresh verification evidence.
