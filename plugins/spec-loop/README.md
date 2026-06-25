@@ -58,6 +58,15 @@ Optional, used only for high-risk (Tier 3) reviews: a plugin providing
 /plugin install spec-loop@spec-loop
 ```
 
+**Channels & previous versions** — one marketplace serves stable plus pre-release
+channels and a pinned archive of every past release:
+```
+/plugin install spec-loop-beta@spec-loop      # beta  — release candidates
+/plugin install spec-loop-alpha@spec-loop     # alpha — bleeding edge
+/plugin install spec-loop-0-3-0@spec-loop     # pin/roll back to v0.3.0 (dashes, not dots)
+```
+See the [CHANGELOG](../../CHANGELOG.md) for the full version history and channel table.
+
 **Quick / offline (no marketplace):**
 ```
 claude --plugin-dir /path/to/spec-loop

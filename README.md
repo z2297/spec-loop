@@ -25,6 +25,25 @@ assembled whole before the run is called complete — both fully autonomous.
 
 Then start a new session (or run `/reload-plugins`).
 
+### Channels & previous versions
+
+One marketplace serves three channels plus a pinned archive of every past release —
+add it once, then install whichever build you want:
+
+```
+/plugin install spec-loop@spec-loop          # stable  — recommended (tracks main)
+/plugin install spec-loop-beta@spec-loop      # beta    — release candidates
+/plugin install spec-loop-alpha@spec-loop     # alpha   — bleeding edge
+
+# Roll back to / pin an exact previous release (version with dashes, not dots):
+/plugin install spec-loop-0-3-0@spec-loop     # v0.3.0
+/plugin install spec-loop-0-2-0@spec-loop     # v0.2.0
+```
+
+If a new build is buggy, install the version-pinned entry for the last release that
+worked for you. See [`CHANGELOG.md`](CHANGELOG.md) for what changed in each version
+and the full channel reference.
+
 ### Required dependencies
 
 `spec-loop` orchestrates two other plugins. Claude Code does **not** auto-install
@@ -55,11 +74,14 @@ autonomy contract, the Iron Council, components, and limitations.
 ```
 .
 ├── .claude-plugin/
-│   └── marketplace.json     # marketplace manifest (name: spec-loop)
+│   └── marketplace.json     # marketplace manifest (stable + beta/alpha + archive)
 ├── .github/workflows/
-│   └── validate.yml         # CI gate (runs on PRs + pushes to main)
+│   ├── validate.yml         # CI gate (runs on PRs + pushes to main/beta/alpha)
+│   └── release.yml          # one-button release (workflow_dispatch)
 ├── scripts/
-│   └── validate_marketplace.py  # self-contained manifest validator
+│   ├── validate_marketplace.py  # self-contained manifest validator
+│   └── release.py               # release helper (bump + archive + changelog)
+├── CHANGELOG.md             # version history + channel reference
 ├── plugins/
 │   └── spec-loop/           # the plugin
 │       ├── .claude-plugin/plugin.json
@@ -79,7 +101,8 @@ structurally broken — so nothing invalid can be merged or deployed. It runs tw
 and passes only if **both** succeed:
 
 1. **`scripts/validate_marketplace.py`** (Python stdlib, no deps) — confirms every
-   manifest parses, required fields exist, each `source` resolves to a real plugin dir,
+   manifest parses, required fields exist, each relative-path `source` resolves to a
+   real plugin dir (and object `git-subdir`/`github` sources are structurally valid),
    plugin names are unique and consistent with their `plugin.json`, and every
    skill/command/agent has the required YAML frontmatter keys.
 2. **`claude plugin validate`** — the official Claude Code validator (schema + frontmatter).
@@ -94,6 +117,40 @@ python3 scripts/validate_marketplace.py .
 branch ruleset** for `main` → enable **Require status checks to pass before merging** and
 add the **`validate`** check (also recommended: **Require a pull request before merging**).
 After that, a red `validate` check blocks the merge.
+
+## Channels & release model
+
+| Channel | Install target              | Backed by      | Meaning                          |
+| ------- | --------------------------- | -------------- | -------------------------------- |
+| stable  | `spec-loop@spec-loop`       | `main` branch  | recommended, release-quality     |
+| beta    | `spec-loop-beta@spec-loop`  | `beta` branch  | release candidates ahead of stable |
+| alpha   | `spec-loop-alpha@spec-loop` | `alpha` branch | bleeding edge, may be unstable   |
+| archive | `spec-loop-<x-y-z>@spec-loop` | tag `vX.Y.Z` | a pinned, immutable past release |
+
+All channels live in the single `.claude-plugin/marketplace.json`. The stable entry
+uses a relative `source`, so it serves whatever is on the branch the consumer added
+(default `main`). The beta/alpha and archive entries use `git-subdir` sources pinned
+to a `ref` (the `beta`/`alpha` branch, or a `vX.Y.Z` tag).
+
+## Releasing
+
+Releases are cut with **Actions → release** (`.github/workflows/release.yml`,
+`workflow_dispatch`): choose a `version` and `channel`. The workflow validates, runs
+`scripts/release.py`, commits to the channel's branch, and — for stable — tags
+`vX.Y.Z`, adds the pinned archive entry, and publishes a GitHub Release from the
+`CHANGELOG.md` section.
+
+The same logic runs locally (e.g. to prepare a release PR):
+
+```
+python3 scripts/release.py 0.5.0                  # stable: bump + archive + changelog
+python3 scripts/release.py 0.6.0-beta.1 --channel beta   # pre-release: bump only
+python3 scripts/release.py --notes 0.5.0          # print a version's release notes
+```
+
+> Stable publishing commits to `main` from CI, which needs `contents: write` (granted
+> in the workflow). If a branch ruleset blocks the bot, run `release.py` locally, open
+> a PR, then push the `vX.Y.Z` tag after merge.
 
 ## License
 

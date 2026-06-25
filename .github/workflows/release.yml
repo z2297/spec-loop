@@ -1,0 +1,95 @@
+name: release
+
+# Cut a release from one button. Pick the channel:
+#   stable -> commits to main, tags vX.Y.Z, adds the pinned archive entry, and
+#             publishes a GitHub Release.
+#   beta / alpha -> commits the pre-release version to the beta/alpha branch and
+#                   publishes a GitHub pre-release (no tag, no archive entry).
+# The same logic runs locally via `python3 scripts/release.py`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version, e.g. 0.5.0 (stable) or 0.5.0-beta.1 (beta/alpha)"
+        required: true
+      channel:
+        description: "Release channel"
+        type: choice
+        default: stable
+        options: [stable, beta, alpha]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ github.event.inputs.version }}
+      CHANNEL: ${{ github.event.inputs.channel }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Resolve target branch
+        id: target
+        run: |
+          if [ "$CHANNEL" = "stable" ]; then echo "branch=main" >> "$GITHUB_OUTPUT";
+          else echo "branch=$CHANNEL" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.target.outputs.branch }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Validate before releasing
+        run: |
+          python3 scripts/validate_marketplace.py .
+          npm install -g @anthropic-ai/claude-code
+          claude plugin validate .
+
+      - name: Cut release (bump + archive + changelog)
+        run: python3 scripts/release.py "$VERSION" --channel "$CHANNEL"
+
+      - name: Guard — plugin.json version matches input
+        run: |
+          got=$(python3 -c "import json;print(json.load(open('plugins/spec-loop/.claude-plugin/plugin.json'))['version'])")
+          if [ "$got" != "$VERSION" ]; then
+            echo "::error::plugin.json version ($got) != requested ($VERSION)"; exit 1
+          fi
+
+      - name: Re-validate after release edits
+        run: python3 scripts/validate_marketplace.py .
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "release: spec-loop v$VERSION ($CHANNEL)" || {
+            echo "Nothing to commit"; exit 0;
+          }
+          git push origin HEAD:${{ steps.target.outputs.branch }}
+
+      - name: Tag and publish (stable)
+        if: ${{ github.event.inputs.channel == 'stable' }}
+        run: |
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+          python3 scripts/release.py --notes "$VERSION" > /tmp/notes.md
+          gh release create "v$VERSION" --title "spec-loop v$VERSION" \
+            --notes-file /tmp/notes.md --target main
+
+      - name: Publish pre-release (beta/alpha)
+        if: ${{ github.event.inputs.channel != 'stable' }}
+        run: |
+          gh release create "v$VERSION" --title "spec-loop v$VERSION" \
+            --notes "Pre-release ($CHANNEL channel). Install with: /plugin install spec-loop-$CHANNEL@spec-loop" \
+            --target "$CHANNEL" --prerelease

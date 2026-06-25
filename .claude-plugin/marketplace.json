@@ -4,14 +4,64 @@
     "name": "Zach McMurry"
   },
   "metadata": {
-    "description": "Marketplace hosting the spec-loop plugin — a spec-driven autonomous development loop for Claude Code.",
-    "version": "1.0.0"
+    "description": "Marketplace hosting the spec-loop plugin — a spec-driven autonomous development loop for Claude Code. Offers a stable channel, beta/alpha pre-release channels, and a pinned archive of previous releases.",
+    "version": "1.1.0"
   },
   "plugins": [
     {
       "name": "spec-loop",
       "source": "./plugins/spec-loop",
-      "description": "Spec-driven autonomous loop — decompose one request into small targeted slices, then plan→execute→review→fix each in parallel git worktrees, surfacing to the human only on genuine ambiguity, material assumptions, or unfixable review blocks."
+      "description": "STABLE channel — the recommended build. Spec-driven autonomous loop: decompose one request into small targeted slices, then plan→execute→review→fix each in parallel git worktrees, surfacing to the human only on genuine ambiguity, material assumptions, or unfixable review blocks."
+    },
+    {
+      "name": "spec-loop-beta",
+      "source": {
+        "source": "git-subdir",
+        "url": "z2297/spec-loop",
+        "path": "plugins/spec-loop",
+        "ref": "beta"
+      },
+      "description": "BETA channel — release candidates ahead of stable. Tracks the `beta` branch."
+    },
+    {
+      "name": "spec-loop-alpha",
+      "source": {
+        "source": "git-subdir",
+        "url": "z2297/spec-loop",
+        "path": "plugins/spec-loop",
+        "ref": "alpha"
+      },
+      "description": "ALPHA channel — bleeding edge, may be unstable. Tracks the `alpha` branch."
+    },
+    {
+      "name": "spec-loop-0-4-0",
+      "source": {
+        "source": "git-subdir",
+        "url": "z2297/spec-loop",
+        "path": "plugins/spec-loop",
+        "ref": "v0.4.0"
+      },
+      "description": "ARCHIVE — spec-loop v0.4.0 (dynamic decomposition + integration gate), pinned. Install to roll back to this exact release."
+    },
+    {
+      "name": "spec-loop-0-3-0",
+      "source": {
+        "source": "git-subdir",
+        "url": "z2297/spec-loop",
+        "path": "plugins/spec-loop",
+        "ref": "v0.3.0"
+      },
+      "description": "ARCHIVE — spec-loop v0.3.0 (The Iron Council), pinned. Install to roll back to this exact release."
+    },
+    {
+      "name": "spec-loop-0-2-0",
+      "source": {
+        "source": "git-subdir",
+        "url": "z2297/spec-loop",
+        "path": "plugins/spec-loop",
+        "ref": "v0.2.0"
+      },
+      "description": "ARCHIVE — spec-loop v0.2.0 (post-review code-quality gate), pinned. Install to roll back to this exact release."
     }
   ]
 }

@@ -89,9 +89,11 @@ class Validator:
 
         source = entry.get("source")
         if not isinstance(source, str) or not source:
-            # Object sources (github/url) are valid but point outside this repo,
-            # so there's nothing local to resolve — skip the path checks.
+            # Object sources (github/url/git-subdir/npm) point outside this repo,
+            # so there's nothing local to resolve — validate them structurally and
+            # skip the path/frontmatter checks.
             if isinstance(source, dict):
+                self.validate_source_object(where, source)
                 return
             self.err(f"{where}: 'source' (relative path) is required")
             return
@@ -115,6 +117,31 @@ class Validator:
             return
 
         self.validate_plugin(name, plugin_dir, manifest_path, entry)
+
+    # Required keys per object-source type (see Claude Code marketplace docs).
+    SOURCE_REQUIRED = {
+        "github": ["repo"],
+        "url": ["url"],
+        "git-subdir": ["url", "path"],
+        "npm": ["package"],
+    }
+    SHA = re.compile(r"^[0-9a-f]{40}$")
+
+    def validate_source_object(self, where, source: dict) -> None:
+        kind = source.get("source")
+        if kind not in self.SOURCE_REQUIRED:
+            self.err(
+                f"{where}: 'source.source' must be one of "
+                f"{sorted(self.SOURCE_REQUIRED)}, got {kind!r}"
+            )
+            return
+        for key in self.SOURCE_REQUIRED[kind]:
+            if not isinstance(source.get(key), str) or not source.get(key):
+                self.err(f"{where}: {kind} source requires string '{key}'")
+        if "ref" in source and not (isinstance(source["ref"], str) and source["ref"]):
+            self.err(f"{where}: 'source.ref' must be a non-empty string")
+        if "sha" in source and not self.SHA.match(str(source.get("sha", ""))):
+            self.err(f"{where}: 'source.sha' must be a 40-char commit SHA")
 
     def validate_plugin(self, entry_name, plugin_dir, manifest_path, entry) -> None:
         manifest = self.load_json(manifest_path)
