@@ -73,6 +73,66 @@ Flags:
 Run state is written under `docs/spec-loop/<run-id>/` (request, slice DAG, open
 escalations, and an audit log of auto-decisions).
 
+## Usage examples
+
+Three scenarios at increasing complexity. The commands are **illustrative** — not
+specific to this repo — and show how decomposition, the **Iron Council**, and the
+autonomy contract behave at different scales.
+
+### Simple — a single low-risk slice (fully autonomous)
+
+```
+/spec-loop "Add a --version flag to the CLI that prints the package version"
+```
+
+What happens:
+- Decomposes to **one slice**, classified **Tier 1** (isolated, no behavioral surface).
+- The Iron Council convenes at **intake** (verdict: ENDORSE) and again on the **plan**
+  (ENDORSE) — the work is sound, so it stays silent.
+- The slice runs end-to-end in its own worktree: plan → execute (TDD) → light
+  `review-pr code` → quality gate → merge.
+- **No interruptions.** You get a final summary with the branch/PR. This is the happy
+  path: when the request and plan are clean, the council never bothers you.
+
+### Mid — a multi-slice feature in parallel (a council concern folded in)
+
+```
+/spec-loop "Add CSV export to the reports page — a backend endpoint and a frontend download button"
+```
+
+What happens:
+- Decomposes into **~2 independent slices** (export endpoint, download button) that run
+  in **parallel worktrees**, each **Tier 2**.
+- On one slice's plan, the **Historian** returns `ENDORSE_WITH_CONCERNS` — e.g. *"reuse
+  the existing `serializeRows()` helper instead of writing a new CSV formatter."*
+- Because it's a minority, non-safety concern, it is **folded into the plan and logged**
+  to `decisions-log.md` — **you are not interrupted**.
+- Both slices pass review + quality gate and merge. Illustrates dependency-aware
+  parallel scheduling plus autonomy-preserving "fold the concern, keep moving."
+
+### Advanced — high-risk, flags, a council objection, and resume
+
+```
+/spec-loop "Migrate auth from session cookies to JWT with refresh tokens, keeping existing sessions valid during rollout" --risk-floor 2 --max-parallel 3
+```
+
+What happens:
+- High-risk surface (auth/security) → slices are **Tier 3**; `--risk-floor 2` forbids any
+  Tier 1 review and `--max-parallel 3` caps concurrency.
+- At **intake**, the **Guardian** raises a `SAFETY` OBJECT — e.g. the rollout could
+  **invalidate live sessions** or leave refresh tokens unrevocable. A single safety
+  objection is enough to **halt**: it's lifted to you via `escalation-gate`'s
+  `council-objection` trigger as **one batched `AskUserQuestion`**.
+- You answer (e.g. "dual-validate cookie + JWT during a 2-week overlap"); the controller
+  injects the decision and proceeds — **without re-convening the council on a question
+  you've already settled.**
+- Tier 3 slices run the deepest review (`review-pr all parallel`, or
+  `/exhaustive-pr-review:exhaustive-pr` if installed). Any further escalations batch at
+  **wave boundaries**, never one-at-a-time.
+- Interrupted? `--resume <run-id>` skips completed slices and continues. Illustrates the
+  full machinery: flags, tiered review, the council's hard stop, batched escalation, and
+  resume.
+
 ## The Iron Council
 
 The loop's adversarial review body. Its job is not to agree — it is to **challenge

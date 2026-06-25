@@ -7,6 +7,10 @@ into small targeted slices, then drives each slice through
 parallel git worktrees as background agents, and surfaces to you **only** when it
 genuinely cannot decide.
 
+Before any work begins, an adversarial **Iron Council** of five agents challenges the
+request and every slice plan — surfacing discrepancies and lifting genuinely unworthy
+work to you, while folding lesser concerns in and continuing.
+
 ## Install
 
 ```
@@ -37,8 +41,9 @@ them, so add them too:
 /spec-loop "Add rate limiting to the public API with per-key quotas"
 ```
 
-See [`plugins/spec-loop/README.md`](plugins/spec-loop/README.md) for flags, the
-autonomy contract, components, and limitations.
+See the plugin README for worked **simple / mid / advanced**
+[usage examples](plugins/spec-loop/README.md#usage-examples), plus flags, the
+autonomy contract, the Iron Council, components, and limitations.
 
 ## What's in this repo
 
@@ -54,8 +59,8 @@ autonomy contract, components, and limitations.
 │   └── spec-loop/           # the plugin
 │       ├── .claude-plugin/plugin.json
 │       ├── commands/        # /spec-loop controller, /spec-loop:quality-gate config
-│       ├── agents/          # spec-loop-slice worker
-│       ├── skills/          # escalation-gate, review-depth-map, quality-gate
+│       ├── agents/          # spec-loop-slice worker + 5 iron-council members
+│       ├── skills/          # iron-council, escalation-gate, review-depth-map, quality-gate
 │       └── README.md
 ├── LICENSE
 └── README.md
