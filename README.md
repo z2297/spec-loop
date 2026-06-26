@@ -85,7 +85,7 @@ autonomy contract, the Iron Council, components, and limitations.
 ├── plugins/
 │   └── spec-loop/           # the plugin
 │       ├── .claude-plugin/plugin.json
-│       ├── commands/        # /spec-loop controller, /spec-loop:quality-gate config
+│       ├── commands/        # /spec-loop controller, /spec-loop:quality-gate config, /spec-loop:dashboard view
 │       ├── agents/          # spec-loop-slice worker + 5 iron-council members
 │       ├── skills/          # iron-council, escalation-gate, review-depth-map, quality-gate
 │       └── README.md
