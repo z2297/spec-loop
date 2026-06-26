@@ -249,6 +249,7 @@ re-prompted — update it anytime with:
 |---------|-------------------|------|
 | command | `spec-loop`       | Controller — decompose, schedule waves, ingest splits, run the integration gate, surface batched escalations |
 | command | `quality-gate`    | View/update the global code-quality gate config (`/spec-loop:quality-gate`) |
+| command | `dashboard`       | Read-only terminal-markdown view of a run — DAG, derived waves, slice status, escalations, decisions (`/spec-loop:dashboard [run-id]`) |
 | agent   | `spec-loop-slice` | Per-slice worker — creates a clean dedicated worktree up front, then plan→council→(split if too big)→execute→review→quality-gate→merge inside it |
 | agent   | `iron-council-skeptic`    | Council member — challenges the premise |
 | agent   | `iron-council-architect`  | Council member — challenges the design |

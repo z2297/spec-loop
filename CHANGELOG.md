@@ -10,9 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are published through three channels from one marketplace
 (`/plugin marketplace add z2297/spec-loop`):
 
-| Channel | Install target            | Source       | Stability                         |
-| ------- | ------------------------- | ------------ | --------------------------------- |
-| stable  | `spec-loop@spec-loop`     | `main`       | recommended, release-quality      |
+| Channel | Install target              | Source         | Stability                          |
+| ------- | --------------------------- | -------------- | ---------------------------------- |
+| stable  | `spec-loop@spec-loop`       | `main`         | recommended, release-quality       |
 | beta    | `spec-loop-beta@spec-loop`  | `beta` branch  | release candidates ahead of stable |
 | alpha   | `spec-loop-alpha@spec-loop` | `alpha` branch | bleeding edge, may be unstable     |
 
@@ -22,6 +22,11 @@ version with dashes instead of dots, since plugin names are kebab-case
 prior build. Pinned entries map to git tags `v<version>`.
 
 ## [Unreleased]
+### Added
+- `/spec-loop:dashboard` — a read-only slash command that renders a terminal-markdown
+  dashboard of a spec-loop run (DAG, derived waves, per-slice status, open escalations,
+  recent decisions) from the durable artifacts under `docs/spec-loop/<run-id>/`. Mutates
+  nothing and triggers no slice work.
 
 ## [1.0.0] - 2026-06-25
 ### Added
