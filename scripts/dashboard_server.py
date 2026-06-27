@@ -36,8 +36,18 @@ import hashlib
 import json
 import os
 import sys
+from collections import namedtuple
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+# A response value object: groups the four output fields so handler helpers
+# pass one argument instead of four (etag defaults to None).
+Response = namedtuple("Response", "status body content_type etag")
+Response.__new__.__defaults__ = (None,)
+
+
+def _text(status, message):
+    return Response(status, message, "text/plain")
 
 # --- bounds (real guardrails, not aspirational) ---
 MAX_RUNS = 500              # cap runs scanned per request
@@ -58,9 +68,10 @@ def resolve_within(root, relpath):
     """Resolve ``relpath`` under ``root``, returning a safe absolute path or
     ``None`` if it escapes the root.
 
-    Rejects null bytes, absolute paths, and ``..`` traversal, then canonicalizes
-    via ``os.path.realpath`` (following symlinks) and asserts the result stays
-    under ``realpath(root)`` using ``os.path.commonpath`` — so a sibling like
+    Rejects null bytes and absolute paths, then canonicalizes via
+    ``os.path.realpath`` (collapsing ``..`` and following symlinks) and asserts
+    the result stays under ``realpath(root)`` using ``os.path.commonpath`` — so
+    ``..`` traversal cannot escape, and a sibling like
     ``<root>-evil`` cannot pass a naive prefix check, and a symlink escaping the
     root is rejected. ``root`` is realpath'd too (macOS ``/tmp`` -> ``/private/tmp``).
     """
@@ -117,14 +128,12 @@ def _scan_one_run(run_dir):
         return {"run_id": run_id, "status": "unreadable"}
 
     open_escs = _parse_open_escalations(run_dir)
-    answered_ids = _parse_answered_slice_ids(run_dir)
-    open_slice_ids = {e["token"] for e in open_escs if e["token"] != "intake"}
-    statuses = {s.get("id"): s.get("status") for s in slices}
-
-    enriched = [
-        _label_slice(s, statuses, open_slice_ids, answered_ids, run_dir)
-        for s in slices
-    ]
+    ctx = {
+        "statuses": {s.get("id"): s.get("status") for s in slices},
+        "open_slice_ids": {e["token"] for e in open_escs if e["token"] != "intake"},
+        "answered_ids": _parse_answered_slice_ids(run_dir),
+    }
+    enriched = [_label_slice(s, ctx, run_dir) for s in slices]
     return {
         "run_id": run_id,
         "base_ref": dag.get("base_ref"),
@@ -143,23 +152,26 @@ def _dep_satisfied(dep_id, statuses):
     return statuses.get(dep_id) in ("complete", "split")
 
 
-def _label_slice(s, statuses, open_slice_ids, answered_ids, run_dir):
+def _label_slice(s, ctx, run_dir):
+    """Attach the honest derived label + report presence to a slice dict.
+
+    ``ctx`` bundles {statuses, open_slice_ids, answered_ids} (see _scan_one_run)."""
     sid = s.get("id")
-    status = s.get("status")
-    if status == "complete":
-        label = "complete"
-    elif status == "split":
-        label = "split"
-    elif sid in open_slice_ids:
-        label = "awaiting-human"
-    elif sid in answered_ids:
-        label = "redispatch-pending"
-    elif all(_dep_satisfied(d, statuses) for d in s.get("deps", [])):
-        label = "runnable-pending"
-    else:
-        label = "blocked-pending"
     report = run_dir / f"slice-{sid}-report.md"
-    return {**s, "label": label, "has_report": report.is_file()}
+    return {**s, "label": _derive_label(s, ctx), "has_report": report.is_file()}
+
+
+def _derive_label(s, ctx):
+    """The six honest labels per dashboard.md Step 4, in precedence order."""
+    sid, status = s.get("id"), s.get("status")
+    if status in ("complete", "split"):
+        return status
+    if sid in ctx["open_slice_ids"]:
+        return "awaiting-human"
+    if sid in ctx["answered_ids"]:
+        return "redispatch-pending"
+    deps_met = all(_dep_satisfied(d, ctx["statuses"]) for d in s.get("deps", []))
+    return "runnable-pending" if deps_met else "blocked-pending"
 
 
 def _derive_waves(slices):
@@ -167,21 +179,38 @@ def _derive_waves(slices):
     (complete or split). Iterate, assigning each later pending slice to the
     first wave at which its deps are met. ``split`` slices are terminal and
     never appear in a wave."""
-    statuses = {s.get("id"): s.get("status") for s in slices}
-    pending = [s for s in slices if s.get("status") == "pending"]
-    done = {sid for sid, st in statuses.items() if st in ("complete", "split")}
+    done = _completed_ids(slices)
+    remaining = _pending_slices(slices)
     waves = []
-    remaining = list(pending)
     while remaining:
-        ready = [s for s in remaining
-                 if all(d in done for d in s.get("deps", []))]
-        if not ready:
+        ready_ids = _ready_ids(remaining, done)
+        if not ready_ids:
             break  # unsatisfiable deps (cycle / missing) — stop, don't loop
-        waves.append([s["id"] for s in ready])
-        done.update(s["id"] for s in ready)
-        ready_ids = {s["id"] for s in ready}
-        remaining = [s for s in remaining if s["id"] not in ready_ids]
+        waves.append(ready_ids)
+        done |= set(ready_ids)
+        remaining = _without(remaining, ready_ids)
     return waves
+
+
+def _completed_ids(slices):
+    """Ids whose status is terminal-satisfied (complete or split)."""
+    return {s.get("id") for s in slices
+            if s.get("status") in ("complete", "split")}
+
+
+def _pending_slices(slices):
+    return [s for s in slices if s.get("status") == "pending"]
+
+
+def _ready_ids(remaining, done):
+    """Ids of pending slices whose every dep is already satisfied."""
+    return [s["id"] for s in remaining
+            if all(d in done for d in s.get("deps", []))]
+
+
+def _without(slices, exclude_ids):
+    excluded = set(exclude_ids)
+    return [s for s in slices if s["id"] not in excluded]
 
 
 def _count_labels(enriched):
@@ -214,23 +243,64 @@ def _parse_answered_slice_ids(run_dir):
 
 
 def _iter_escalation_headers(run_dir):
-    """Yield ``(token, title, state)`` for each escalation header, where state
-    is 'OPEN', 'ANSWERED', or '' (unknown)."""
+    """Yield ``(token, title, state)`` for each escalation block, where state
+    is 'OPEN', 'ANSWERED', or '' (unknown).
+
+    Per dashboard.md Step 6, an entry is ANSWERED when EITHER its header carries
+    ``(status: ANSWERED)`` OR its ``Answer:`` line is filled in — two independent
+    signals — so a partial write (Answer filled, header still OPEN) is treated as
+    ANSWERED/redispatch-pending, not awaiting-human. So this scans each block's
+    body lines for a non-empty ``Answer:`` and lets it override an OPEN header."""
     text = _read_text_capped(run_dir / "escalations.md")
+    for header, body in _split_escalation_blocks(text):
+        token, title, header_state = _parse_escalation_header(header)
+        if token is None:
+            continue
+        state = "ANSWERED" if (header_state == "ANSWERED" or
+                               _has_filled_answer(body)) else header_state
+        yield token, title, state
+
+
+def _split_escalation_blocks(text):
+    """Yield ``(header_line, [body_lines])`` for each ``## [...]`` block."""
+    header, body = None, []
     for line in text.splitlines():
-        if not line.startswith("## ["):
-            continue
-        close = line.find("]", 4)
-        if close == -1:
-            continue
-        token = line[4:close].strip()
-        rest = line[close + 1:]
-        state = ""
-        if "(status: OPEN)" in rest:
-            state = "OPEN"
-        elif "(status: ANSWERED)" in rest:
-            state = "ANSWERED"
-        yield token, rest.split("(status:")[0].strip(), state
+        if line.startswith("## ["):
+            if header is not None:
+                yield header, body
+            header, body = line, []
+        elif header is not None:
+            body.append(line)
+    if header is not None:
+        yield header, body
+
+
+def _parse_escalation_header(line):
+    """Return ``(token, title, state)`` for a header, or ``(None, '', '')``."""
+    close = line.find("]", 4)
+    if close == -1:
+        return None, "", ""
+    rest = line[close + 1:]
+    state = _header_state(rest)
+    return line[4:close].strip(), rest.split("(status:")[0].strip(), state
+
+
+def _header_state(rest):
+    """Map the part after the bracket to 'OPEN', 'ANSWERED', or '' (unknown)."""
+    if "(status: OPEN)" in rest:
+        return "OPEN"
+    if "(status: ANSWERED)" in rest:
+        return "ANSWERED"
+    return ""
+
+
+def _has_filled_answer(body_lines):
+    """True if any body line is a non-empty ``Answer: <text>``."""
+    for line in body_lines:
+        stripped = line.strip().lstrip("-* ").strip()
+        if stripped.lower().startswith("answer:"):
+            return bool(stripped[len("answer:"):].strip())
+    return False
 
 
 def _request_excerpt(run_dir):
@@ -281,26 +351,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
     # --- only GET and HEAD exist; everything else is 405 ---
 
     def do_GET(self):
-        self._handle(write_body=True)
+        self._emit(self._route(), write_body=True)
 
     def do_HEAD(self):
-        self._handle(write_body=False)
+        self._emit(self._route(), write_body=False)
 
-    def _handle(self, write_body):
+    def _route(self):
+        """Dispatch the request to a handler, returning a Response."""
         if not self._host_allowed():
-            self._send(421, b"misdirected request", "text/plain", write_body)
-            return
+            return _text(421, b"misdirected request")
         route = self.path.split("?", 1)[0]
         if route == "/api/runs":
-            self._serve_api_runs(write_body)
-        elif route.startswith("/api/runs/"):
-            self._serve_api_run_detail(route[len("/api/runs/"):], write_body)
-        else:
-            self._serve_static(route, write_body)
+            return self._serve_api_runs()
+        if route.startswith("/api/runs/"):
+            return self._serve_api_run_detail(route[len("/api/runs/"):])
+        return self._serve_static(route)
 
     # Any other verb is rejected uniformly.
     def _reject_method(self):
-        self._send(405, b"method not allowed", "text/plain", True)
+        self._emit(_text(405, b"method not allowed"), write_body=True)
 
     do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _reject_method
 
@@ -310,54 +379,47 @@ class DashboardHandler(BaseHTTPRequestHandler):
         host = self.headers.get("Host")
         return host is not None and host in self.allowed_hosts
 
-    # --- endpoints ---
+    # --- endpoints (each returns a Response) ---
 
-    def _serve_api_runs(self, write_body):
+    def _serve_api_runs(self):
         runs = scan_runs(self.data_root)
         etag = _etag("|".join(self._collection_material(runs)))
-        if self._if_none_match(etag):
-            self._send(304, b"", "application/json", False, etag=etag)
-            return
-        payload = {"runs": runs}
-        self._send_json(payload, write_body, etag=etag)
+        return (self._not_modified(etag)
+                or _json_response({"runs": runs}, etag))
 
     def _collection_material(self, runs):
-        out = []
-        for r in runs:
-            rd = Path(self.data_root) / r["run_id"]
-            out.append(f"{r['run_id']}:{_run_etag(rd)}")
-        return out
+        data_root = Path(self.data_root)
+        return [f"{r['run_id']}:{_run_etag(data_root / r['run_id'])}"
+                for r in runs]
 
-    def _serve_api_run_detail(self, raw_id, write_body):
-        # Path-traversal-safe: enumerate discovered run dirs, exact-match basename.
-        run_id = raw_id.rstrip("/")
+    def _serve_api_run_detail(self, raw_id):
+        run_dir = self._resolve_run_dir(raw_id.rstrip("/"))
+        if run_dir is None:
+            return _text(404, b"not found")
+        etag = _run_etag(Path(run_dir))
+        return (self._not_modified(etag)
+                or _json_response(_scan_one_run(Path(run_dir)), etag))
+
+    def _resolve_run_dir(self, run_id):
+        """Path-traversal-safe: enumerate discovered run dirs, exact-match the
+        basename, then realpath-confine. Returns the dir or None (one uniform
+        miss for "no such run" and "escapes root" — no path-existence oracle)."""
         known = {Path(p).parent.name for p in
                  glob.glob(str(Path(self.data_root) / "*" / "dag.json"))}
         if run_id not in known:
-            # Same 404 for "no such run" and "escapes root" — no path oracle.
-            self._send(404, b"not found", "text/plain", write_body)
-            return
+            return None
         run_dir = resolve_within(self.data_root, run_id)
-        if run_dir is None or not os.path.isdir(run_dir):
-            self._send(404, b"not found", "text/plain", write_body)
-            return
-        etag = _run_etag(Path(run_dir))
-        if self._if_none_match(etag):
-            self._send(304, b"", "application/json", False, etag=etag)
-            return
-        self._send_json(_scan_one_run(Path(run_dir)), write_body, etag=etag)
+        return run_dir if run_dir and os.path.isdir(run_dir) else None
 
-    def _serve_static(self, route, write_body):
+    def _serve_static(self, route):
         rel = route.lstrip("/") or "index.html"
         target = resolve_within(self.assets_root, rel)
         if target is None or not os.path.isfile(target):
-            self._send(404, b"not found", "text/plain", write_body)
-            return
+            return _text(404, b"not found")
         body = self._read_asset(target)
         if body is None:
-            self._send(404, b"not found", "text/plain", write_body)
-            return
-        self._send(200, body, _content_type(target), write_body)
+            return _text(404, b"not found")
+        return Response(200, body, _content_type(target))
 
     def _read_asset(self, target):
         try:
@@ -368,26 +430,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     # --- response helpers ---
 
-    def _if_none_match(self, etag):
-        return self.headers.get("If-None-Match") == etag
+    def _not_modified(self, etag):
+        """Return a 304 Response if the client's If-None-Match matches, else None."""
+        if self.headers.get("If-None-Match") == etag:
+            return Response(304, b"", "application/json", etag)
+        return None
 
-    def _send_json(self, obj, write_body, etag=None):
-        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
-        self._send(200, body, "application/json; charset=utf-8", write_body, etag=etag)
-
-    def _send(self, status, body, content_type, write_body, etag=None):
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
+    def _emit(self, resp, write_body):
+        self.send_response(resp.status)
+        self.send_header("Content-Type", resp.content_type)
+        self.send_header("Content-Length", str(len(resp.body)))
         self.send_header("X-Content-Type-Options", "nosniff")
-        if etag:
-            self.send_header("ETag", etag)
+        if resp.etag:
+            self.send_header("ETag", resp.etag)
         self.end_headers()
-        if write_body and body:
-            self.wfile.write(body)
+        if write_body and resp.body:
+            self.wfile.write(resp.body)
 
     def log_message(self, *args):
         pass  # quiet by default
+
+
+def _json_response(obj, etag=None):
+    body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+    return Response(200, body, "application/json; charset=utf-8", etag)
 
 
 _CONTENT_TYPES = {
@@ -435,7 +501,7 @@ def _host_allowlist(port):
     return {f"127.0.0.1:{port}", f"localhost:{port}"}
 
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(description="read-only spec-loop dashboard server")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT,
                     help=f"port to bind on 127.0.0.1 (default: {DEFAULT_PORT})")

@@ -37,18 +37,22 @@ def write_dag(run_dir: Path, slices: list, base_ref="alpha", base_sha="abc123"):
     )
 
 
-def slice_obj(sid, deps=None, status="pending", depth=0, parent=None, goal="g"):
-    return {
+def slice_obj(sid, **overrides):
+    """Build a slice dict; override any field via kwargs
+    (deps, status, depth, parent, goal, ...)."""
+    base = {
         "id": sid,
-        "goal": goal,
+        "goal": "g",
         "files": [],
         "subsystems": [],
-        "deps": deps or [],
+        "deps": [],
         "risk_tier": 2,
-        "depth": depth,
-        "parent": parent,
-        "status": status,
+        "depth": 0,
+        "parent": None,
+        "status": "pending",
     }
+    base.update(overrides)
+    return base
 
 
 def build_fixture(tmp: Path) -> Path:
@@ -160,6 +164,25 @@ class ScanRunsTests(unittest.TestCase):
         labels = {s["id"]: s["label"] for s in run["slices"]}
         self.assertEqual(labels["s2"], "awaiting-human")
         self.assertEqual(labels["s3"], "redispatch-pending")
+
+    def test_filled_answer_overrides_open_header(self):
+        # Per dashboard.md Step 6, a filled-in Answer: line means ANSWERED even
+        # if the header still says OPEN (partial write) -> redispatch-pending.
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            docs = Path(d) / "docs" / "spec-loop"
+            write_dag(docs / "r", [
+                slice_obj("s1", status="complete"),
+                slice_obj("s2", deps=["s1"], status="pending"),
+            ])
+            (docs / "r" / "escalations.md").write_text(
+                "## [s2] thing   (status: OPEN)\n- Answer: human said go ahead\n"
+            )
+            run = next(x for x in ds.scan_runs(docs) if x["run_id"] == "r")
+            labels = {s["id"]: s["label"] for s in run["slices"]}
+            self.assertEqual(labels["s2"], "redispatch-pending")
+            # ...and it is no longer reported as an OPEN escalation.
+            self.assertNotIn("s2", {e["token"] for e in run["open_escalations"]})
 
     def test_intake_open_escalation_attaches_to_no_slice(self):
         run = self.runs_by_id()["run-esc"]

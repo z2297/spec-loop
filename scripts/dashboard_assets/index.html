@@ -63,9 +63,12 @@
       const card = document.createElement('div');
       card.className = 'run';
       if (run.status === 'unreadable') {
-        card.innerHTML =
-          '<h2>' + run.run_id + '</h2>' +
-          '<div class="meta">run in progress — state momentarily unreadable</div>';
+        const h2 = document.createElement('h2');
+        h2.textContent = run.run_id;
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.textContent = 'run in progress — state momentarily unreadable';
+        card.append(h2, meta);
         return card;
       }
       const h2 = document.createElement('h2');
