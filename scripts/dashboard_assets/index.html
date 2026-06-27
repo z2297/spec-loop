@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>spec-loop dashboard</title>
+  <style>
+    :root {
+      --bg: #0d1117; --panel: #161b22; --border: #30363d;
+      --fg: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+      --ok: #3fb950; --warn: #d29922; --bad: #f85149; --split: #a371f7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--fg);
+      font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    header {
+      padding: 1rem 1.25rem; border-bottom: 1px solid var(--border);
+      display: flex; align-items: baseline; gap: 0.75rem; flex-wrap: wrap;
+    }
+    h1 { font-size: 1.1rem; margin: 0; color: var(--accent); }
+    .tag { color: var(--muted); font-size: 0.8rem; }
+    main { padding: 1.25rem; max-width: 1100px; margin: 0 auto; }
+    .run {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 8px; padding: 1rem; margin-bottom: 1rem;
+    }
+    .run h2 { margin: 0 0 0.35rem; font-size: 1rem; }
+    .run .meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 0.5rem; }
+    .excerpt { color: var(--fg); opacity: 0.85; margin: 0.25rem 0 0.6rem; }
+    .counts { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .pill {
+      padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.75rem;
+      border: 1px solid var(--border); color: var(--muted);
+    }
+    .empty, .err { color: var(--muted); padding: 2rem 0; text-align: center; }
+    .err { color: var(--bad); }
+    footer { color: var(--muted); font-size: 0.75rem; text-align: center; padding: 1rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>spec-loop dashboard</h1>
+    <span class="tag">read-only &middot; placeholder UI (s2 replaces this)</span>
+  </header>
+  <main>
+    <div id="runs" class="empty">loading runs&hellip;</div>
+  </main>
+  <footer>served locally by scripts/dashboard_server.py &middot; this view never mutates run state</footer>
+
+  <script>
+    const $runs = document.getElementById('runs');
+
+    function pill(label, n) {
+      const el = document.createElement('span');
+      el.className = 'pill';
+      el.textContent = label + ': ' + n;
+      return el;
+    }
+
+    function renderRun(run) {
+      const card = document.createElement('div');
+      card.className = 'run';
+      if (run.status === 'unreadable') {
+        card.innerHTML =
+          '<h2>' + run.run_id + '</h2>' +
+          '<div class="meta">run in progress — state momentarily unreadable</div>';
+        return card;
+      }
+      const h2 = document.createElement('h2');
+      h2.textContent = run.run_id;
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.textContent = (run.base_ref || '?') + '@' + (run.base_sha || '?').slice(0, 7);
+      const excerpt = document.createElement('div');
+      excerpt.className = 'excerpt';
+      excerpt.textContent = run.request_excerpt || '';
+      const counts = document.createElement('div');
+      counts.className = 'counts';
+      const c = run.counts || {};
+      Object.keys(c).sort().forEach(k => counts.appendChild(pill(k, c[k])));
+      card.append(h2, meta, excerpt, counts);
+      return card;
+    }
+
+    async function load() {
+      try {
+        const res = await fetch('/api/runs', { headers: { 'Accept': 'application/json' } });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        const runs = (data.runs || []);
+        if (!runs.length) {
+          $runs.className = 'empty';
+          $runs.textContent = 'no spec-loop runs found';
+          return;
+        }
+        $runs.className = '';
+        $runs.textContent = '';
+        runs.forEach(r => $runs.appendChild(renderRun(r)));
+      } catch (e) {
+        $runs.className = 'err';
+        $runs.textContent = 'could not reach dashboard server: ' + e.message;
+      }
+    }
+
+    load();
+  </script>
+</body>
+</html>
