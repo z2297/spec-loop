@@ -27,6 +27,13 @@ prior build. Pinned entries map to git tags `v<version>`.
   dashboard of a spec-loop run (DAG, derived waves, per-slice status, open escalations,
   recent decisions) from the durable artifacts under `docs/spec-loop/<run-id>/`. Mutates
   nothing and triggers no slice work.
+- Web dashboard — a read-only, modern dark-theme single-page web UI (zero-dependency,
+  served by a stdlib `http.server`) that renders the same run view in a browser: an
+  all-runs overview and a single-run drill-down (DAG/waves, slice table, status rollup,
+  open escalations, recent decisions), with near-real-time auto-refresh (~2.5s polling +
+  ETag/304) and a freshness indicator. Strictly read-only (`GET`/`HEAD` only, `127.0.0.1`
+  bind, no mutation endpoints). Launch it with the new `/spec-loop:dashboard-serve`
+  command, which starts `scripts/dashboard_server.py` and prints the local URL.
 
 ## [1.0.0] - 2026-06-25
 ### Added
