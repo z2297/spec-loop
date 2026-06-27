@@ -6,108 +6,486 @@
   <title>spec-loop dashboard</title>
   <style>
     :root {
-      --bg: #0d1117; --panel: #161b22; --border: #30363d;
+      --bg: #0d1117; --panel: #161b22; --panel-2: #1c2230; --border: #30363d;
       --fg: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
       --ok: #3fb950; --warn: #d29922; --bad: #f85149; --split: #a371f7;
+      --neutral: #6e7681;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0; background: var(--bg); color: var(--fg);
       font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
     header {
       padding: 1rem 1.25rem; border-bottom: 1px solid var(--border);
       display: flex; align-items: baseline; gap: 0.75rem; flex-wrap: wrap;
+      position: sticky; top: 0; background: var(--bg); z-index: 5;
     }
     h1 { font-size: 1.1rem; margin: 0; color: var(--accent); }
     .tag { color: var(--muted); font-size: 0.8rem; }
+    .spacer { flex: 1 1 auto; }
+    .freshness {
+      font-size: 0.75rem; color: var(--muted);
+      display: inline-flex; align-items: center; gap: 0.4rem;
+    }
+    .dot {
+      width: 8px; height: 8px; border-radius: 999px; background: var(--ok);
+      box-shadow: 0 0 6px var(--ok);
+    }
+    .freshness.stale .dot { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+    .freshness.down .dot { background: var(--bad); box-shadow: 0 0 6px var(--bad); }
     main { padding: 1.25rem; max-width: 1100px; margin: 0 auto; }
+
+    .crumbs { margin: 0 0 1rem; color: var(--muted); font-size: 0.85rem; }
+    .crumbs a { cursor: pointer; }
+
     .run {
       background: var(--panel); border: 1px solid var(--border);
       border-radius: 8px; padding: 1rem; margin-bottom: 1rem;
     }
+    .run.clickable { cursor: pointer; transition: border-color 0.15s; }
+    .run.clickable:hover { border-color: var(--accent); }
     .run h2 { margin: 0 0 0.35rem; font-size: 1rem; }
+    .run h2 a { color: var(--fg); }
     .run .meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 0.5rem; }
     .excerpt { color: var(--fg); opacity: 0.85; margin: 0.25rem 0 0.6rem; }
-    .counts { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .counts, .pill-row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
     .pill {
-      padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.75rem;
-      border: 1px solid var(--border); color: var(--muted);
+      padding: 0.1rem 0.55rem; border-radius: 999px; font-size: 0.75rem;
+      border: 1px solid var(--border); color: var(--muted); white-space: nowrap;
     }
-    .empty, .err { color: var(--muted); padding: 2rem 0; text-align: center; }
+    /* derived-label color treatment (applied via fixed allowlist map only) */
+    .lbl-complete           { color: var(--ok);      border-color: var(--ok); }
+    .lbl-split              { color: var(--split);   border-color: var(--split); }
+    .lbl-awaiting-human     { color: var(--bad);     border-color: var(--bad); }
+    .lbl-redispatch-pending { color: var(--warn);    border-color: var(--warn); }
+    .lbl-runnable-pending   { color: var(--accent);  border-color: var(--accent); }
+    .lbl-blocked-pending    { color: var(--muted);   border-color: var(--border); }
+    .lbl-unknown            { color: var(--neutral); border-color: var(--neutral); }
+
+    .section { margin: 1.25rem 0; }
+    .section h3 {
+      font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em;
+      color: var(--muted); margin: 0 0 0.6rem; border-bottom: 1px solid var(--border);
+      padding-bottom: 0.3rem;
+    }
+    .wave {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+      padding: 0.6rem 0.8rem; margin-bottom: 0.5rem;
+    }
+    .wave .wave-title { color: var(--accent); font-size: 0.8rem; margin-bottom: 0.4rem; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+    th, td {
+      text-align: left; padding: 0.4rem 0.55rem; border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 600; }
+    td.goal { max-width: 360px; }
+    .deps { color: var(--muted); }
+
+    .esc {
+      background: var(--panel-2); border-left: 3px solid var(--bad);
+      border-radius: 4px; padding: 0.5rem 0.7rem; margin-bottom: 0.5rem;
+    }
+    .esc .token { color: var(--bad); font-weight: 600; }
+    .esc .token.intake { color: var(--warn); }
+
+    .decisions { margin: 0; padding: 0; list-style: none; }
+    .decisions li {
+      padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--border);
+      color: var(--fg); opacity: 0.9; white-space: pre-wrap; word-break: break-word;
+    }
+
+    .runnable-list, .awaiting-list { margin: 0.3rem 0 0; color: var(--muted); }
+
+    .transient {
+      background: var(--panel); border: 1px dashed var(--warn); border-radius: 8px;
+      padding: 1rem; margin-bottom: 1rem; color: var(--warn);
+    }
+    .empty, .err, .notice { color: var(--muted); padding: 2rem 0; text-align: center; }
     .err { color: var(--bad); }
-    footer { color: var(--muted); font-size: 0.75rem; text-align: center; padding: 1rem; }
+    .notice {
+      color: var(--warn); padding: 0.6rem; text-align: left;
+      border: 1px solid var(--warn); border-radius: 6px; margin-bottom: 1rem;
+    }
+    footer {
+      color: var(--muted); font-size: 0.75rem; text-align: center; padding: 1rem;
+      border-top: 1px solid var(--border); margin-top: 2rem;
+    }
   </style>
 </head>
 <body>
   <header>
     <h1>spec-loop dashboard</h1>
-    <span class="tag">read-only &middot; placeholder UI (s2 replaces this)</span>
+    <span class="tag">read-only</span>
+    <span class="spacer"></span>
+    <span id="freshness" class="freshness"><span class="dot"></span><span id="fresh-text">connecting&hellip;</span></span>
   </header>
   <main>
-    <div id="runs" class="empty">loading runs&hellip;</div>
+    <div id="crumbs" class="crumbs" hidden></div>
+    <div id="view" class="empty">loading runs&hellip;</div>
   </main>
   <footer>served locally by scripts/dashboard_server.py &middot; this view never mutates run state</footer>
 
   <script>
-    const $runs = document.getElementById('runs');
+    "use strict";
 
-    function pill(label, n) {
-      const el = document.createElement('span');
-      el.className = 'pill';
-      el.textContent = label + ': ' + n;
-      return el;
+    // ---- config -----------------------------------------------------------
+    const POLL_MS = 2500;            // single source of truth for poll cadence
+    const GOAL_TRUNCATE = 100;       // chars before truncating a slice goal in the table
+
+    // Fixed allowlist: derived label -> known CSS class. An unexpected label can
+    // never become markup or an injected class name; it falls back to lbl-unknown.
+    const LABEL_CLASS = {
+      "complete": "lbl-complete",
+      "split": "lbl-split",
+      "awaiting-human": "lbl-awaiting-human",
+      "redispatch-pending": "lbl-redispatch-pending",
+      "runnable-pending": "lbl-runnable-pending",
+      "blocked-pending": "lbl-blocked-pending",
+    };
+    function labelClass(label) {
+      return Object.prototype.hasOwnProperty.call(LABEL_CLASS, label)
+        ? LABEL_CLASS[label] : "lbl-unknown";
     }
 
-    function renderRun(run) {
-      const card = document.createElement('div');
-      card.className = 'run';
-      if (run.status === 'unreadable') {
-        const h2 = document.createElement('h2');
-        h2.textContent = run.run_id;
-        const meta = document.createElement('div');
-        meta.className = 'meta';
-        meta.textContent = 'run in progress — state momentarily unreadable';
-        card.append(h2, meta);
-        return card;
+    // ---- DOM refs ---------------------------------------------------------
+    const $view = document.getElementById("view");
+    const $crumbs = document.getElementById("crumbs");
+    const $freshness = document.getElementById("freshness");
+    const $freshText = document.getElementById("fresh-text");
+
+    // ---- app state --------------------------------------------------------
+    // view: {kind:"overview"} | {kind:"detail", runId}
+    let view = parseHash();
+    let timer = null;          // the single re-armed poll timer
+    let goneTimer = null;      // deferred "run gone → overview" nav, cancellable
+    let viewGen = 0;           // bumped on every view entry; stale in-flight polls are dropped
+    let lastOkAt = 0;          // ms timestamp of last successful check (200 OR 304)
+    let connected = false;     // have we ever had a good response for this view?
+    // ETag stored keyed by the active URL so If-None-Match always matches the route.
+    const etags = Object.create(null);
+
+    // ---- tiny DOM helpers (textContent only — never innerHTML on data) -----
+    function el(tag, opts) {
+      const node = document.createElement(tag);
+      if (opts) {
+        if (opts.cls) node.className = opts.cls;
+        if (opts.text != null) node.textContent = String(opts.text);
       }
-      const h2 = document.createElement('h2');
-      h2.textContent = run.run_id;
-      const meta = document.createElement('div');
-      meta.className = 'meta';
-      meta.textContent = (run.base_ref || '?') + '@' + (run.base_sha || '?').slice(0, 7);
-      const excerpt = document.createElement('div');
-      excerpt.className = 'excerpt';
-      excerpt.textContent = run.request_excerpt || '';
-      const counts = document.createElement('div');
-      counts.className = 'counts';
-      const c = run.counts || {};
-      Object.keys(c).sort().forEach(k => counts.appendChild(pill(k, c[k])));
+      return node;
+    }
+    function pill(label, n, cls) {
+      return el("span", { cls: "pill " + (cls || ""), text: n == null ? label : label + ": " + n });
+    }
+    function sha7(s) { return (s == null ? "?" : String(s)).slice(0, 7); }
+
+    // ---- routing ----------------------------------------------------------
+    function parseHash() {
+      const h = (location.hash || "").replace(/^#/, "");
+      if (h.startsWith("run/")) {
+        const id = decodeURIComponent(h.slice("run/".length));
+        if (id) return { kind: "detail", runId: id };
+      }
+      return { kind: "overview" };
+    }
+    function activeUrl() {
+      return view.kind === "detail"
+        ? "/api/runs/" + encodeURIComponent(view.runId)
+        : "/api/runs";
+    }
+
+    // ---- freshness indicator ----------------------------------------------
+    function markOk() { lastOkAt = Date.now(); connected = true; }
+    function renderFreshness() {
+      if (!connected) {
+        $freshness.className = "freshness down";
+        $freshText.textContent = "reconnecting…";
+        return;
+      }
+      const secs = Math.max(0, Math.round((Date.now() - lastOkAt) / 1000));
+      $freshness.className = "freshness" + (secs > POLL_MS / 1000 * 3 ? " stale" : "");
+      $freshText.textContent = "updated " + secs + "s ago";
+    }
+    function markDown() {
+      // keep last good render; only the indicator reflects the outage
+      connected = false;
+      renderFreshness();
+    }
+
+    // ---- breadcrumbs ------------------------------------------------------
+    function renderCrumbs() {
+      $crumbs.textContent = "";
+      if (view.kind !== "detail") { $crumbs.hidden = true; return; }
+      $crumbs.hidden = false;
+      const home = el("a", { text: "← all runs" });
+      home.addEventListener("click", () => navigate({ kind: "overview" }));
+      $crumbs.append(home, document.createTextNode("  /  " + view.runId));
+    }
+
+    // ---- overview render --------------------------------------------------
+    function renderOverview(runs) {
+      $view.className = "";
+      $view.textContent = "";
+      if (!runs.length) {
+        $view.className = "empty";
+        $view.textContent = "no spec-loop runs found";
+        return;
+      }
+      runs.forEach((r) => $view.appendChild(overviewCard(r)));
+    }
+    function overviewCard(run) {
+      if (run.status === "unreadable") return transientCard(run.run_id);
+      const card = el("div", { cls: "run clickable" });
+      const h2 = el("h2");
+      const link = el("a", { text: run.run_id });
+      link.addEventListener("click", (e) => { e.stopPropagation(); navigate({ kind: "detail", runId: run.run_id }); });
+      h2.appendChild(link);
+      const meta = el("div", { cls: "meta", text: (run.base_ref || "?") + "@" + sha7(run.base_sha) });
+      const excerpt = el("div", { cls: "excerpt", text: run.request_excerpt || "" });
+      const counts = el("div", { cls: "counts" });
+      countPills(run.counts).forEach((p) => counts.appendChild(p));
       card.append(h2, meta, excerpt, counts);
+      card.addEventListener("click", () => navigate({ kind: "detail", runId: run.run_id }));
+      return card;
+    }
+    function countPills(counts) {
+      const c = counts || {};
+      return Object.keys(c).sort().map((k) => pill(k, c[k], labelClass(k)));
+    }
+    function transientCard(runId) {
+      const card = el("div", { cls: "transient" });
+      card.append(
+        el("strong", { text: runId }),
+        el("div", { text: "run in progress — state momentarily unreadable" })
+      );
       return card;
     }
 
-    async function load() {
+    // ---- detail render ----------------------------------------------------
+    function renderDetail(run) {
+      $view.className = "";
+      $view.textContent = "";
+      if (!run || run.status === "unreadable") {
+        $view.appendChild(transientCard((run && run.run_id) || view.runId));
+        return;
+      }
+      $view.appendChild(detailHeader(run));
+      $view.appendChild(wavesSection(run));
+      $view.appendChild(sliceTableSection(run));
+      $view.appendChild(rollupSection(run));
+      $view.appendChild(escalationsSection(run));
+      $view.appendChild(decisionsSection(run));
+    }
+    function detailHeader(run) {
+      const card = el("div", { cls: "run" });
+      card.appendChild(el("h2", { text: run.run_id }));
+      card.appendChild(el("div", { cls: "meta", text: (run.base_ref || "?") + "@" + (run.base_sha || "?") }));
+      if (run.request_excerpt) card.appendChild(el("div", { cls: "excerpt", text: run.request_excerpt }));
+      return card;
+    }
+    function sliceById(run) {
+      const map = Object.create(null);
+      (run.slices || []).forEach((s) => { map[s.id] = s; });
+      return map;
+    }
+    function wavesSection(run) {
+      const sec = el("div", { cls: "section" });
+      sec.appendChild(el("h3", { text: "DAG / waves" }));
+      const waves = run.waves || [];
+      if (!waves.length) {
+        sec.appendChild(el("div", { cls: "empty", text: "no pending waves — nothing runnable" }));
+        return sec;
+      }
+      const byId = sliceById(run);
+      waves.forEach((ids, i) => {
+        const w = el("div", { cls: "wave" });
+        w.appendChild(el("div", { cls: "wave-title", text: "Wave " + i }));
+        const row = el("div", { cls: "pill-row" });
+        (ids || []).forEach((id) => {
+          const s = byId[id];
+          const lbl = s ? s.label : "unknown";
+          row.appendChild(pill(id + " · " + lbl, null, labelClass(lbl)));
+        });
+        w.appendChild(row);
+        sec.appendChild(w);
+      });
+      return sec;
+    }
+    function sliceTableSection(run) {
+      const sec = el("div", { cls: "section" });
+      sec.appendChild(el("h3", { text: "slices" }));
+      const table = el("table");
+      const thead = el("thead");
+      const htr = el("tr");
+      ["id", "goal", "tier", "depth", "parent", "deps", "status"].forEach((h) => htr.appendChild(el("th", { text: h })));
+      thead.appendChild(htr);
+      const tbody = el("tbody");
+      (run.slices || []).forEach((s) => tbody.appendChild(sliceRow(s)));
+      table.append(thead, tbody);
+      sec.appendChild(table);
+      return sec;
+    }
+    function truncate(text, n) {
+      const t = text == null ? "" : String(text);
+      return t.length > n ? t.slice(0, n) + "…" : t;
+    }
+    function sliceRow(s) {
+      const tr = el("tr");
+      tr.appendChild(el("td", { text: s.id }));
+      tr.appendChild(el("td", { cls: "goal", text: truncate(s.goal, GOAL_TRUNCATE) }));
+      tr.appendChild(el("td", { text: s.risk_tier }));
+      tr.appendChild(el("td", { text: s.depth }));
+      tr.appendChild(el("td", { text: s.parent == null ? "—" : s.parent }));
+      tr.appendChild(el("td", { cls: "deps", text: (s.deps && s.deps.length) ? s.deps.join(", ") : "—" }));
+      const status = el("td");
+      status.appendChild(pill(s.label, null, labelClass(s.label)));
+      tr.appendChild(status);
+      return tr;
+    }
+    function rollupSection(run) {
+      const sec = el("div", { cls: "section" });
+      sec.appendChild(el("h3", { text: "status rollup" }));
+      const counts = el("div", { cls: "counts" });
+      countPills(run.counts).forEach((p) => counts.appendChild(p));
+      sec.appendChild(counts);
+      const slices = run.slices || [];
+      const runnable = slices.filter((s) => s.label === "runnable-pending").map((s) => s.id);
+      const awaiting = slices.filter((s) => s.label === "awaiting-human").map((s) => s.id);
+      sec.appendChild(el("div", { cls: "runnable-list", text: "runnable now: " + (runnable.length ? runnable.join(", ") : "—") }));
+      sec.appendChild(el("div", { cls: "awaiting-list", text: "awaiting human: " + (awaiting.length ? awaiting.join(", ") : "—") }));
+      return sec;
+    }
+    function escalationsSection(run) {
+      const sec = el("div", { cls: "section" });
+      sec.appendChild(el("h3", { text: "open escalations" }));
+      const escs = run.open_escalations || [];
+      if (!escs.length) {
+        sec.appendChild(el("div", { cls: "empty", text: "none open" }));
+        return sec;
+      }
+      escs.forEach((e) => {
+        const box = el("div", { cls: "esc" });
+        const isIntake = e.token === "intake";
+        box.appendChild(el("span", { cls: "token" + (isIntake ? " intake" : ""), text: "[" + (e.token || "?") + "] " }));
+        box.appendChild(el("span", { text: e.title || "" }));
+        sec.appendChild(box);
+      });
+      return sec;
+    }
+    function decisionsSection(run) {
+      const sec = el("div", { cls: "section" });
+      sec.appendChild(el("h3", { text: "recent decisions" }));
+      const tail = run.decisions_tail || [];
+      if (!tail.length) {
+        sec.appendChild(el("div", { cls: "empty", text: "no decisions logged" }));
+        return sec;
+      }
+      const ul = el("ul", { cls: "decisions" });
+      tail.forEach((line) => ul.appendChild(el("li", { text: line })));
+      sec.appendChild(ul);
+      return sec;
+    }
+
+    // ---- detail-not-found (404 from the detail endpoint) ------------------
+    function renderRunGone() {
+      $view.className = "";
+      $view.textContent = "";
+      const notice = el("div", { cls: "notice", text: "run “" + view.runId + "” is no longer available — returning to all runs…" });
+      $view.appendChild(notice);
+      clearTimeout(goneTimer);            // a fresh nav supersedes any prior pending one
+      goneTimer = setTimeout(() => navigate({ kind: "overview" }), 1200);
+    }
+
+    // ---- fetch + poll loop ------------------------------------------------
+    // One re-armed timer. A `gen` snapshot is checked after every await so a poll
+    // that resolves after the user navigated never paints into the wrong view.
+    async function poll() {
+      const url = activeUrl();
+      const gen = viewGen;
       try {
-        const res = await fetch('/api/runs', { headers: { 'Accept': 'application/json' } });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
-        const runs = (data.runs || []);
-        if (!runs.length) {
-          $runs.className = 'empty';
-          $runs.textContent = 'no spec-loop runs found';
-          return;
-        }
-        $runs.className = '';
-        $runs.textContent = '';
-        runs.forEach(r => $runs.appendChild(renderRun(r)));
+        const res = await fetch(url, fetchOpts(url));
+        if (gen === viewGen) await applyResponse(res, url, gen);
       } catch (e) {
-        $runs.className = 'err';
-        $runs.textContent = 'could not reach dashboard server: ' + e.message;
+        if (gen === viewGen) markDown();  // unreachable: keep last render
+      } finally {
+        if (gen === viewGen) {            // only the current view owns the timer
+          renderFreshness();
+          arm();
+        }
       }
     }
 
-    load();
+    function fetchOpts(url) {
+      const headers = { "Accept": "application/json" };
+      const prev = etags[url];
+      if (prev) headers["If-None-Match"] = prev;
+      return { headers };
+    }
+
+    // Act on one response. 304 -> freshness only (no repaint); detail 404 ->
+    // run-gone; 2xx -> capture ETag and repaint the active view; else keep last render.
+    async function applyResponse(res, url, gen) {
+      if (res.status === 304) {
+        markOk();
+      } else if (res.status === 404 && view.kind === "detail") {
+        markOk();
+        renderRunGone();
+      } else if (res.ok) {
+        const etag = res.headers.get("ETag");
+        if (etag) etags[url] = etag;
+        const data = await res.json();
+        if (gen !== viewGen) return;      // re-check after the second await
+        markOk();
+        repaint(data);
+      } else {
+        markDown();                       // 421/5xx/etc: keep last render
+      }
+    }
+
+    function repaint(data) {
+      if (view.kind === "detail") renderDetail(data);
+      else renderOverview(data.runs || []);
+    }
+    function arm() {
+      clearTimeout(timer);
+      timer = setTimeout(poll, POLL_MS);
+    }
+
+    // ---- navigation -------------------------------------------------------
+    function navigate(next) {
+      view = next;
+      const hash = next.kind === "detail" ? "#run/" + encodeURIComponent(next.runId) : "#";
+      if (location.hash !== hash) location.hash = hash;   // also triggers hashchange (idempotent)
+      enterView();
+    }
+    function enterView() {
+      clearTimeout(timer);
+      clearTimeout(goneTimer);            // cancel any pending "run gone" auto-nav
+      viewGen++;                          // invalidate any in-flight poll from the prior view
+      connected = false;                  // require a fresh good response for the new view
+      renderCrumbs();
+      $view.className = "empty";
+      $view.textContent = "loading…";
+      renderFreshness();
+      poll();                             // immediate fetch, then re-arms itself
+    }
+
+    window.addEventListener("hashchange", () => {
+      const next = parseHash();
+      if (next.kind !== view.kind || next.runId !== view.runId) {
+        view = next;
+        enterView();
+      }
+    });
+
+    // tick the relative freshness stamp once a second (display only — no fetch)
+    setInterval(renderFreshness, 1000);
+
+    enterView();
   </script>
 </body>
 </html>
