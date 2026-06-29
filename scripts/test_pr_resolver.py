@@ -18,7 +18,11 @@ Usage:
 
 import json
 import os
+import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 import urllib.error
 from pathlib import Path
@@ -513,6 +517,49 @@ class TestMain(unittest.TestCase):
 
     def test_requires_url_or_ref_range(self):
         self.assertNotEqual(pr.main([]), 0)
+
+
+class TestResolveLocalRealGit(unittest.TestCase):
+    """Exercises resolve_local / resolve_diff against a REAL git repo (NO _run
+    mock). Regression guard for the bug where `git rev-parse` WITHOUT --verify
+    echoes the `--end-of-options` token into the captured SHA (base_sha became
+    "--end-of-options\\n<sha>", which then broke resolve_diff's reachability
+    check end-to-end for the local --base/--head path). The mocked
+    TestResolveLocal above cannot catch this class — it stubs _run and never
+    runs git, so it never sees rev-parse's real stdout."""
+
+    _SHA = re.compile(r"^[0-9a-f]{40}$")
+
+    def _git(self, *args):
+        subprocess.run(["git", *args], cwd=self._tmp, check=True,
+                       capture_output=True, text=True)
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="pr_resolver_realgit_")
+        self.addCleanup(shutil.rmtree, self._tmp, ignore_errors=True)
+        self._git("init", "-q")
+        self._git("config", "user.email", "t@example.com")
+        self._git("config", "user.name", "Test")
+        Path(self._tmp, "f.txt").write_text("base\n")
+        self._git("add", "f.txt")
+        self._git("commit", "-q", "-m", "base")
+        Path(self._tmp, "f.txt").write_text("head\n")
+        self._git("commit", "-q", "-am", "head")
+
+    def test_resolve_local_yields_clean_shas(self):
+        rec = pr.resolve_local("HEAD~1", "HEAD", repo_dir=self._tmp)
+        # base_sha/head_sha must be bare 40-hex, never carrying the echoed
+        # `--end-of-options` token or an embedded newline.
+        self.assertRegex(rec["base_sha"], self._SHA)
+        self.assertRegex(rec["head_sha"], self._SHA)
+        self.assertNotIn("--end-of-options", rec["base_sha"])
+        self.assertNotIn("--end-of-options", rec["head_sha"])
+
+    def test_resolve_diff_returns_nonempty_local_diff(self):
+        rec = pr.resolve_local("HEAD~1", "HEAD", repo_dir=self._tmp)
+        diff = pr.resolve_diff(rec, repo_dir=self._tmp)
+        self.assertTrue(diff.strip(), "local ref-range diff must be non-empty")
+        self.assertIn("f.txt", diff)
 
 
 if __name__ == "__main__":
