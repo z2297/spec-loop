@@ -250,6 +250,18 @@ def _normalized_remote(parsed, **fields):
         pr_id=parsed["pr_id"], web_url=parsed["web_url"], **fields)
 
 
+def _parse_json(raw, provider):
+    """json.loads with an actionable ResolverError on malformed payloads, so a
+    bad CLI/REST response fails with a clear message rather than a raw traceback."""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ResolverError(
+            f"{provider} returned a response that is not valid JSON ({exc}); "
+            "cannot resolve the PR"
+        ) from exc
+
+
 def resolve(parsed: dict) -> dict:
     """Resolve a parsed PR READ-ONLY to the normalized record. Dispatches to the
     per-provider resolver; each prefers the official CLI / REST and FAILS with an
@@ -271,7 +283,7 @@ def _resolve_github(parsed: dict) -> dict:
         "gh", "pr", "view", validate_pr_id(parsed["pr_id"]),
         "--repo", parsed["repo"], "--json", fields,
     ])
-    d = json.loads(out)
+    d = _parse_json(out, "gh")
     return _normalized_remote(
         parsed,
         base_ref=d.get("baseRefName", ""), base_sha=d.get("baseRefOid", ""),
@@ -295,7 +307,7 @@ def _resolve_azure(parsed: dict) -> dict:
         "--id", validate_pr_id(parsed["pr_id"]),
         "--org", org_url, "--output", "json",
     ])
-    d = json.loads(out)
+    d = _parse_json(out, "az")
     return _normalized_remote(
         parsed,
         base_ref=_strip_ref(d.get("targetRefName")),
@@ -318,7 +330,7 @@ def _resolve_bitbucket(parsed: dict) -> dict:
         f"/pullrequests/{validate_pr_id(parsed['pr_id'])}"
     )
     raw = _http_get(api, headers={"Authorization": f"Bearer {token}"})
-    d = json.loads(raw.decode("utf-8"))
+    d = _parse_json(raw.decode("utf-8"), "Bitbucket")
     src, dst = d.get("source") or {}, d.get("destination") or {}
     return _normalized_remote(
         parsed,

@@ -269,6 +269,18 @@ class TestResolveBitbucket(unittest.TestCase):
         self.assertIn("BITBUCKET_TOKEN", str(ctx.exception))
 
 
+class TestMalformedPayload(unittest.TestCase):
+    def test_non_json_cli_output_raises_actionable(self):
+        # A CLI emitting non-JSON (e.g. an auth banner) must fail with an
+        # actionable message, not a raw JSONDecodeError traceback.
+        parsed = pr.parse_pr_url("https://github.com/acme/widgets/pull/42")
+        with mock.patch("pr_resolver.shutil.which", return_value="/usr/bin/gh"), \
+             mock.patch("pr_resolver._run", return_value="not json <<<"):
+            with self.assertRaises(pr.ResolverError) as ctx:
+                pr.resolve(parsed)
+        self.assertIn("not valid JSON", str(ctx.exception))
+
+
 class TestTokenNeverLeaks(unittest.TestCase):
     SECRET = "s3cr3t-token-value"
 
