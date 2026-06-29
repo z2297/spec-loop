@@ -207,6 +207,13 @@ def _strip_ref(ref):
     return (ref or "").removeprefix("refs/heads/")
 
 
+def _is_remote(record) -> bool:
+    """True for a PR fetched from a provider, False for a `local` ref-range (or a
+    record with no provider). Names the remote-vs-local distinction that drives
+    which fetch strategy resolve_diff uses."""
+    return record.get("provider") not in (None, "", "local")
+
+
 def _normalized(*, provider, host, repo, pr_id, web_url,
                 base_ref, base_sha, head_ref, head_sha,
                 title, description):
@@ -403,7 +410,7 @@ def resolve_diff(record, repo_dir=".") -> str:
         raise ResolverError("record is missing base_sha/head_sha; cannot diff")
 
     fetches = []
-    if record.get("provider") not in (None, "", "local"):
+    if _is_remote(record):
         # Fetch the base and head commits directly, plus the PR head ref (which
         # makes a fork/unfetched head reachable when fetching the bare SHA is
         # refused by the server).
