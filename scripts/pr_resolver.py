@@ -347,11 +347,16 @@ def _resolve_bitbucket(parsed: dict) -> dict:
 def resolve_local(base, head, repo_dir=".") -> dict:
     """Resolve an explicit local base/head ref-range to the normalized record.
     Refs are UNTRUSTED, so each is option-terminated (--end-of-options) before
-    git so a leading-dash value can never be parsed as a flag."""
+    git so a leading-dash value can never be parsed as a flag. `--verify` is
+    required: without it `git rev-parse` ECHOES the `--end-of-options` token to
+    stdout, polluting the captured SHA with a literal `--end-of-options\n`
+    prefix; `--verify` makes rev-parse emit only the single resolved object id."""
     base_sha = _run(
-        ["git", "rev-parse", "--end-of-options", base], cwd=repo_dir).strip()
+        ["git", "rev-parse", "--verify", "--end-of-options", base],
+        cwd=repo_dir).strip()
     head_sha = _run(
-        ["git", "rev-parse", "--end-of-options", head], cwd=repo_dir).strip()
+        ["git", "rev-parse", "--verify", "--end-of-options", head],
+        cwd=repo_dir).strip()
     identity = {"provider": "local", "host": "", "repo": repo_dir,
                 "pr_id": "", "web_url": ""}
     content = {"base_ref": base, "base_sha": base_sha,
