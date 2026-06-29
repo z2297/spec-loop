@@ -300,5 +300,131 @@ class TestTokenNeverLeaks(unittest.TestCase):
         self.assertNotIn(self.SECRET, captured["out"])
 
 
+# --------------------------------------------------------------------------
+# Local ref-range mode, provider-aware diff materialization, and main()
+# --------------------------------------------------------------------------
+
+class TestResolveLocal(unittest.TestCase):
+    def test_local_ref_range_uses_git_rev_parse_read_only(self):
+        with mock.patch("pr_resolver._run", side_effect=["aaa\n", "bbb\n"]) as m:
+            rec = pr.resolve_local("main", "feature", repo_dir="/tmp/x")
+        first = m.call_args_list[0].args[0]
+        self.assertEqual(first[0], "git")
+        self.assertIn("rev-parse", first)
+        self.assertEqual(rec["provider"], "local")
+        self.assertEqual(rec["base_sha"], "aaa")
+        self.assertEqual(rec["head_sha"], "bbb")
+        # the untrusted ref is option-terminated so it can never be a flag
+        self.assertIn("--end-of-options", first)
+        self.assertEqual(first[-1], "main")
+
+    def test_local_leading_dash_ref_is_not_a_flag(self):
+        # A malicious --base="--output=/tmp/x" must reach git AFTER
+        # --end-of-options, never as a parsed flag.
+        with mock.patch("pr_resolver._run", side_effect=["a\n", "b\n"]) as m:
+            pr.resolve_local("--output=/tmp/x", "feature", repo_dir="/tmp/x")
+        argv = m.call_args_list[0].args[0]
+        self.assertIn("--end-of-options", argv)
+        self.assertLess(argv.index("--end-of-options"),
+                        argv.index("--output=/tmp/x"))
+
+
+class TestResolveDiff(unittest.TestCase):
+    def _record(self, **over):
+        rec = {"provider": "github", "repo": "acme/widgets", "pr_id": "42",
+               "base_sha": "aaa", "head_sha": "bbb",
+               "base_ref": "main", "head_ref": "feature"}
+        rec.update(over)
+        return rec
+
+    def test_github_fetches_pr_head_ref_then_diffs_read_only(self):
+        with mock.patch("pr_resolver._run",
+                        side_effect=["", "", "diff --git ...\n"]) as m:
+            out = pr.resolve_diff(self._record(), repo_dir="/tmp/x")
+        argvs = [c.args[0] for c in m.call_args_list]
+        # every call is git, read verbs only, no mutation verbs anywhere
+        for argv in argvs:
+            self.assertEqual(argv[0], "git")
+            for w in ("push", "commit", "merge", "checkout", "reset", "rebase"):
+                self.assertNotIn(w, argv)
+        verbs = [a[1] for a in argvs]
+        self.assertEqual(verbs[:2], ["fetch", "fetch"])  # base sha + PR head
+        self.assertEqual(verbs[-1], "diff")
+        # GitHub PR head ref is fetched
+        self.assertTrue(any("pull/42/head" in tok
+                            for a in argvs for tok in a))
+        self.assertIn("diff --git", out)
+
+    def test_diff_argv_terminates_user_shas_as_options(self):
+        with mock.patch("pr_resolver._run",
+                        side_effect=["", "", "d\n"]) as m:
+            pr.resolve_diff(self._record(), repo_dir="/tmp/x")
+        diff_argv = m.call_args_list[-1].args[0]
+        self.assertEqual(diff_argv[0:2], ["git", "diff"])
+        self.assertIn("--end-of-options", diff_argv)
+        idx = diff_argv.index("--end-of-options")
+        self.assertEqual(diff_argv[idx + 1], "aaa..bbb")
+
+    def test_bitbucket_fetches_source_branch(self):
+        rec = self._record(provider="bitbucket", repo="team/repo",
+                            head_ref="feature")
+        with mock.patch("pr_resolver._run",
+                        side_effect=["", "", "d\n"]) as m:
+            pr.resolve_diff(rec, repo_dir="/tmp/x")
+        argvs = [c.args[0] for c in m.call_args_list]
+        self.assertTrue(any("feature" in tok for a in argvs for tok in a))
+
+    def test_missing_shas_raise(self):
+        with self.assertRaises(pr.ResolverError):
+            pr.resolve_diff(self._record(base_sha=""), repo_dir="/tmp/x")
+
+    def test_unreachable_commits_raise_actionable(self):
+        # fetch succeeds but git diff fails because the commits aren't present
+        with mock.patch("pr_resolver._run",
+                        side_effect=["", "",
+                                     pr.ResolverError("bad revision 'bbb'")]):
+            with self.assertRaises(pr.ResolverError):
+                pr.resolve_diff(self._record(), repo_dir="/tmp/x")
+
+
+class TestMain(unittest.TestCase):
+    def test_emits_json_for_url(self):
+        rec = {"provider": "github", "pr_id": "42"}
+        with mock.patch("pr_resolver.resolve", return_value=rec), \
+             mock.patch("sys.stdout") as out:
+            rc = pr.main(["https://github.com/acme/widgets/pull/42"])
+        self.assertEqual(rc, 0)
+        printed = "".join(c.args[0] for c in out.write.call_args_list if c.args)
+        self.assertIn('"provider"', printed)
+
+    def test_diff_flag_prints_diff_after_json(self):
+        rec = {"provider": "github", "pr_id": "42",
+               "base_sha": "a", "head_sha": "b"}
+        with mock.patch("pr_resolver.resolve", return_value=rec), \
+             mock.patch("pr_resolver.resolve_diff", return_value="DIFFTEXT"), \
+             mock.patch("sys.stdout") as out:
+            rc = pr.main(["https://github.com/acme/widgets/pull/42", "--diff"])
+        self.assertEqual(rc, 0)
+        printed = "".join(c.args[0] for c in out.write.call_args_list if c.args)
+        self.assertIn("DIFFTEXT", printed)
+        self.assertLess(printed.index('"provider"'), printed.index("DIFFTEXT"))
+
+    def test_local_mode_emits_json(self):
+        rec = {"provider": "local", "base_sha": "a", "head_sha": "b"}
+        with mock.patch("pr_resolver.resolve_local", return_value=rec), \
+             mock.patch("sys.stdout") as out:
+            rc = pr.main(["--base", "main", "--head", "feature"])
+        self.assertEqual(rc, 0)
+        printed = "".join(c.args[0] for c in out.write.call_args_list if c.args)
+        self.assertIn('"local"', printed)
+
+    def test_resolver_error_exits_nonzero(self):
+        rc = pr.main(["https://gitlab.com/a/b/pull/1"])
+        self.assertNotEqual(rc, 0)
+
+    def test_requires_url_or_ref_range(self):
+        self.assertNotEqual(pr.main([]), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -296,6 +296,85 @@ def _resolve_bitbucket(parsed: dict) -> dict:
     )
 
 
+def resolve_local(base, head, repo_dir=".") -> dict:
+    """Resolve an explicit local base/head ref-range to the normalized record.
+    Refs are UNTRUSTED, so each is option-terminated (--end-of-options) before
+    git so a leading-dash value can never be parsed as a flag."""
+    base_sha = _run(
+        ["git", "rev-parse", "--end-of-options", base], cwd=repo_dir).strip()
+    head_sha = _run(
+        ["git", "rev-parse", "--end-of-options", head], cwd=repo_dir).strip()
+    return {
+        "provider": "local", "host": "", "repo": repo_dir,
+        "pr_id": "", "base_ref": base, "base_sha": base_sha,
+        "head_ref": head, "head_sha": head_sha,
+        "title": "", "description": "", "web_url": "",
+    }
+
+
+def _pr_head_refspec(record) -> str | None:
+    """The provider-specific remote ref that carries the PR head, so the head
+    commit (often on a fork / unfetched ref) becomes reachable locally. None for
+    a local record. See git fetch semantics: a plain fetch does NOT pull these."""
+    provider, pr_id, head_ref = (
+        record.get("provider"), record.get("pr_id"), record.get("head_ref"))
+    if provider == "github" and pr_id:
+        return f"pull/{pr_id}/head"
+    if provider == "azure" and pr_id:
+        # ADO exposes PR refs under refs/pull/<id>/merge; fall back below if the
+        # server doesn't, since base_sha/head_sha are also fetched directly.
+        return f"refs/pull/{pr_id}/merge"
+    if provider == "bitbucket" and head_ref:
+        return head_ref
+    return None
+
+
+def resolve_diff(record, repo_dir=".") -> str:
+    """Materialize base..head as a local unified diff (returned as TEXT) so a
+    downstream reviewer sees identical bytes. READ verbs only.
+
+    A plain `git fetch` leaves a remote/fork PR's commits unreachable, so this
+    fetches the base commit and the provider-specific PR head ref first, then
+    diffs the two SHAs. If the commits remain unreachable, it raises an
+    actionable ResolverError rather than emitting a partial/empty diff (never
+    half-resolves). Every user-derived SHA in a git argv is option-terminated."""
+    base, head = record.get("base_sha"), record.get("head_sha")
+    if not base or not head:
+        raise ResolverError("record is missing base_sha/head_sha; cannot diff")
+
+    fetches = []
+    refspec = _pr_head_refspec(record)
+    if record.get("provider") not in (None, "", "local"):
+        # Fetch the base commit and the PR head ref into the local clone.
+        fetches.append(["git", "fetch", "--quiet", "origin",
+                        "--end-of-options", base])
+        if refspec:
+            fetches.append(["git", "fetch", "--quiet", "origin",
+                            "--end-of-options", refspec])
+    else:
+        # Local record: a plain fetch refreshes whatever remotes exist.
+        fetches.append(["git", "fetch", "--quiet"])
+
+    for argv in fetches:
+        try:
+            _run(argv, cwd=repo_dir)
+        except ResolverError:
+            # A failed fetch (e.g. no network / no such remote ref) is tolerated
+            # here; the diff step below is the authoritative reachability check.
+            pass
+
+    try:
+        return _run(
+            ["git", "diff", "--end-of-options", f"{base}..{head}"],
+            cwd=repo_dir)
+    except ResolverError as exc:
+        raise ResolverError(
+            f"could not diff {base}..{head} in {repo_dir!r}: the PR commits are "
+            f"not reachable locally ({exc}). Ensure --repo-dir is a clone of the "
+            "same repository."
+        ) from exc
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="Read-only PR resolver (Azure DevOps / GitHub / Bitbucket).")
@@ -311,12 +390,14 @@ def main(argv=None) -> int:
         if args.url:
             record = resolve(parse_pr_url(args.url))
         elif args.base and args.head:
-            raise ResolverError("local --base/--head mode not yet implemented")
+            record = resolve_local(args.base, args.head, repo_dir=args.repo_dir)
         else:
             raise ResolverError(
                 "provide a PR URL, or both --base and --head for a local "
                 "ref-range")
         print(json.dumps(record, ensure_ascii=False, indent=2))
+        if args.diff:
+            print(resolve_diff(record, repo_dir=args.repo_dir))
         return 0
     except ResolverError as exc:
         print(f"error: {exc}", file=sys.stderr)
