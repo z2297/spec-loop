@@ -9,9 +9,17 @@ JSON on stdout. It prefers the official CLI when available (`gh pr view`,
 CLI/credential is absent it FAILS with an actionable message and a non-zero
 exit -- it never half-resolves and never mutates the PR or the repo.
 
-Normalized record (the stable inter-slice JSON contract -- 10 fields):
+Normalized record (the stable inter-slice JSON contract -- 10 fields, built in
+exactly one place, _normalized()):
     {provider, host, repo, pr_id, base_ref, base_sha, head_ref, head_sha,
      title, description, web_url}
+  - provider: github | azure | bitbucket | local
+  - repo: for a remote PR, the provider slug (owner/repo, or org/project/repo
+    for Azure); for a `local` record, the filesystem repo_dir instead.
+  - pr_id: matches ^[0-9]+$ for a remote PR; "" for a `local` ref-range record.
+  - base_ref/base_sha/head_ref/head_sha are load-bearing and are guaranteed
+    non-empty (an empty one is treated as an incomplete resolve and raises).
+  - title/description may legitimately be empty.
 
 `resolve_diff(record, repo_dir)` materializes the base..head diff locally and
 returns it as diff TEXT: it fetches the provider-specific PR ref (plus the base
@@ -199,21 +207,47 @@ def _strip_ref(ref):
     return (ref or "").removeprefix("refs/heads/")
 
 
-def _normalized(parsed, *, base_ref, base_sha, head_ref, head_sha,
+def _normalized(*, provider, host, repo, pr_id, web_url,
+                base_ref, base_sha, head_ref, head_sha,
                 title, description):
-    return {
-        "provider": parsed["provider"],
-        "host": parsed["host"],
-        "repo": parsed["repo"],
-        "pr_id": parsed["pr_id"],
+    """Build the 10-field normalized record -- the single source of truth for
+    the inter-slice JSON contract shape. Every resolver (remote and local) goes
+    through here so the shape can never drift between construction paths.
+
+    The base/head ref+sha fields are load-bearing (downstream diffing depends on
+    them), so an empty one means the provider returned an incomplete PR (e.g. an
+    abandoned/unmerged PR with no merge commit, or a partial API response) -- a
+    half-resolve, which the contract forbids. title/description are allowed to be
+    empty (an empty PR description is legitimate)."""
+    rec = {
+        "provider": provider,
+        "host": host,
+        "repo": repo,
+        "pr_id": pr_id,
         "base_ref": base_ref,
         "base_sha": base_sha,
         "head_ref": head_ref,
         "head_sha": head_sha,
         "title": title,
         "description": description,
-        "web_url": parsed["web_url"],
+        "web_url": web_url,
     }
+    for field in ("base_ref", "base_sha", "head_ref", "head_sha"):
+        if not rec[field]:
+            raise ResolverError(
+                f"provider {provider!r} returned a PR record with empty "
+                f"{field!r}; cannot resolve (the PR may be abandoned/unmerged, "
+                "or the API/CLI response was incomplete)"
+            )
+    return rec
+
+
+def _normalized_remote(parsed, **fields):
+    """Convenience wrapper: build a normalized record from a parsed remote PR
+    (provider/host/repo/pr_id/web_url) plus the resolved ref/sha/title fields."""
+    return _normalized(
+        provider=parsed["provider"], host=parsed["host"], repo=parsed["repo"],
+        pr_id=parsed["pr_id"], web_url=parsed["web_url"], **fields)
 
 
 def resolve(parsed: dict) -> dict:
@@ -238,7 +272,7 @@ def _resolve_github(parsed: dict) -> dict:
         "--repo", parsed["repo"], "--json", fields,
     ])
     d = json.loads(out)
-    return _normalized(
+    return _normalized_remote(
         parsed,
         base_ref=d.get("baseRefName", ""), base_sha=d.get("baseRefOid", ""),
         head_ref=d.get("headRefName", ""), head_sha=d.get("headRefOid", ""),
@@ -262,7 +296,7 @@ def _resolve_azure(parsed: dict) -> dict:
         "--org", org_url, "--output", "json",
     ])
     d = json.loads(out)
-    return _normalized(
+    return _normalized_remote(
         parsed,
         base_ref=_strip_ref(d.get("targetRefName")),
         base_sha=(d.get("lastMergeTargetCommit") or {}).get("commitId", ""),
@@ -286,7 +320,7 @@ def _resolve_bitbucket(parsed: dict) -> dict:
     raw = _http_get(api, headers={"Authorization": f"Bearer {token}"})
     d = json.loads(raw.decode("utf-8"))
     src, dst = d.get("source") or {}, d.get("destination") or {}
-    return _normalized(
+    return _normalized_remote(
         parsed,
         base_ref=(dst.get("branch") or {}).get("name", ""),
         base_sha=(dst.get("commit") or {}).get("hash", ""),
@@ -304,29 +338,41 @@ def resolve_local(base, head, repo_dir=".") -> dict:
         ["git", "rev-parse", "--end-of-options", base], cwd=repo_dir).strip()
     head_sha = _run(
         ["git", "rev-parse", "--end-of-options", head], cwd=repo_dir).strip()
-    return {
-        "provider": "local", "host": "", "repo": repo_dir,
-        "pr_id": "", "base_ref": base, "base_sha": base_sha,
-        "head_ref": head, "head_sha": head_sha,
-        "title": "", "description": "", "web_url": "",
-    }
+    return _normalized(
+        provider="local", host="", repo=repo_dir, pr_id="", web_url="",
+        base_ref=base, base_sha=base_sha, head_ref=head, head_sha=head_sha,
+        title="", description="",
+    )
 
 
 def _pr_head_refspec(record) -> str | None:
     """The provider-specific remote ref that carries the PR head, so the head
     commit (often on a fork / unfetched ref) becomes reachable locally. None for
-    a local record. See git fetch semantics: a plain fetch does NOT pull these."""
+    a local record. A plain `git fetch` does NOT pull these refs. This is best
+    effort to make head_sha reachable; resolve_diff also fetches head_sha
+    directly and then VERIFIES reachability, so it does not rely on the refspec
+    existing on the server."""
     provider, pr_id, head_ref = (
         record.get("provider"), record.get("pr_id"), record.get("head_ref"))
     if provider == "github" and pr_id:
         return f"pull/{pr_id}/head"
     if provider == "azure" and pr_id:
-        # ADO exposes PR refs under refs/pull/<id>/merge; fall back below if the
-        # server doesn't, since base_sha/head_sha are also fetched directly.
+        # ADO exposes PR refs under refs/pull/<id>/merge.
         return f"refs/pull/{pr_id}/merge"
     if provider == "bitbucket" and head_ref:
         return head_ref
     return None
+
+
+def _commit_is_reachable(sha, repo_dir) -> bool:
+    """True if `sha` resolves to a commit object in the local clone (READ-only:
+    git rev-parse --verify). The SHA is option-terminated so it can't be a flag."""
+    try:
+        _run(["git", "rev-parse", "--verify", "--quiet", "--end-of-options",
+              f"{sha}^{{commit}}"], cwd=repo_dir)
+        return True
+    except ResolverError:
+        return False
 
 
 def resolve_diff(record, repo_dir=".") -> str:
@@ -334,20 +380,26 @@ def resolve_diff(record, repo_dir=".") -> str:
     downstream reviewer sees identical bytes. READ verbs only.
 
     A plain `git fetch` leaves a remote/fork PR's commits unreachable, so this
-    fetches the base commit and the provider-specific PR head ref first, then
-    diffs the two SHAs. If the commits remain unreachable, it raises an
-    actionable ResolverError rather than emitting a partial/empty diff (never
-    half-resolves). Every user-derived SHA in a git argv is option-terminated."""
+    fetches the base SHA, the head SHA, and the provider-specific PR head ref,
+    then VERIFIES that both commits are reachable before diffing. If either
+    commit is unreachable -- or the diff is empty despite distinct base/head --
+    it raises an actionable ResolverError rather than emitting a partial/empty
+    diff (never half-resolves). Every user-derived SHA in a git argv is
+    option-terminated so it can never be parsed as a flag."""
     base, head = record.get("base_sha"), record.get("head_sha")
     if not base or not head:
         raise ResolverError("record is missing base_sha/head_sha; cannot diff")
 
     fetches = []
-    refspec = _pr_head_refspec(record)
     if record.get("provider") not in (None, "", "local"):
-        # Fetch the base commit and the PR head ref into the local clone.
+        # Fetch the base and head commits directly, plus the PR head ref (which
+        # makes a fork/unfetched head reachable when fetching the bare SHA is
+        # refused by the server).
         fetches.append(["git", "fetch", "--quiet", "origin",
                         "--end-of-options", base])
+        fetches.append(["git", "fetch", "--quiet", "origin",
+                        "--end-of-options", head])
+        refspec = _pr_head_refspec(record)
         if refspec:
             fetches.append(["git", "fetch", "--quiet", "origin",
                             "--end-of-options", refspec])
@@ -359,20 +411,31 @@ def resolve_diff(record, repo_dir=".") -> str:
         try:
             _run(argv, cwd=repo_dir)
         except ResolverError:
-            # A failed fetch (e.g. no network / no such remote ref) is tolerated
-            # here; the diff step below is the authoritative reachability check.
+            # A single failed fetch (no network, a server that refuses bare-SHA
+            # fetches, a missing PR ref) is tolerated here: the explicit
+            # reachability check below -- not any one fetch -- is the
+            # authoritative gate, so the function still fails loudly if the
+            # commits are genuinely absent.
             pass
 
-    try:
-        return _run(
-            ["git", "diff", "--end-of-options", f"{base}..{head}"],
-            cwd=repo_dir)
-    except ResolverError as exc:
+    for label, sha in (("base", base), ("head", head)):
+        if not _commit_is_reachable(sha, repo_dir):
+            raise ResolverError(
+                f"{label} commit {sha} is not reachable in {repo_dir!r} after "
+                "fetch: the PR ref could not be materialized. Ensure --repo-dir "
+                "is a clone of the same repository and the PR head ref is "
+                "fetchable."
+            )
+
+    diff_text = _run(
+        ["git", "diff", "--end-of-options", f"{base}..{head}"], cwd=repo_dir)
+    if not diff_text.strip() and base != head:
         raise ResolverError(
-            f"could not diff {base}..{head} in {repo_dir!r}: the PR commits are "
-            f"not reachable locally ({exc}). Ensure --repo-dir is a clone of the "
-            "same repository."
-        ) from exc
+            f"empty diff for {base}..{head} in {repo_dir!r} despite distinct "
+            "base/head commits -- the head likely resolved to a stale/wrong "
+            "commit. Ensure --repo-dir is a clone of the same repository."
+        )
+    return diff_text
 
 
 def main(argv=None) -> int:

@@ -330,6 +330,10 @@ class TestResolveLocal(unittest.TestCase):
 
 
 class TestResolveDiff(unittest.TestCase):
+    """resolve_diff runs, in order: provider fetches (base, head, PR-ref), then a
+    `git rev-parse --verify` reachability check per SHA, then `git diff`. The fake
+    _run below routes by verb so tests are not coupled to the exact call count."""
+
     def _record(self, **over):
         rec = {"provider": "github", "repo": "acme/widgets", "pr_id": "42",
                "base_sha": "aaa", "head_sha": "bbb",
@@ -337,54 +341,127 @@ class TestResolveDiff(unittest.TestCase):
         rec.update(over)
         return rec
 
-    def test_github_fetches_pr_head_ref_then_diffs_read_only(self):
-        with mock.patch("pr_resolver._run",
-                        side_effect=["", "", "diff --git ...\n"]) as m:
+    def _fake_run(self, *, diff="diff --git ...\n", reachable=True,
+                  fail_fetch=False):
+        """Build a fake _run that records calls and routes by git verb."""
+        calls = []
+
+        def run(argv, *, cwd=None):
+            calls.append(argv)
+            verb = argv[1]
+            if verb == "fetch":
+                if fail_fetch:
+                    raise pr.ResolverError("fetch failed")
+                return ""
+            if verb == "rev-parse":
+                if reachable:
+                    return "ok\n"
+                raise pr.ResolverError("Needed a single revision")
+            if verb == "diff":
+                return diff
+            return ""
+        run.calls = calls
+        return run
+
+    def test_github_fetches_base_head_and_pr_ref_then_diffs_read_only(self):
+        run = self._fake_run()
+        with mock.patch("pr_resolver._run", side_effect=run):
             out = pr.resolve_diff(self._record(), repo_dir="/tmp/x")
-        argvs = [c.args[0] for c in m.call_args_list]
-        # every call is git, read verbs only, no mutation verbs anywhere
-        for argv in argvs:
+        argvs = run.calls
+        for argv in argvs:                       # every call is read-only git
             self.assertEqual(argv[0], "git")
             for w in ("push", "commit", "merge", "checkout", "reset", "rebase"):
                 self.assertNotIn(w, argv)
         verbs = [a[1] for a in argvs]
-        self.assertEqual(verbs[:2], ["fetch", "fetch"])  # base sha + PR head
-        self.assertEqual(verbs[-1], "diff")
-        # GitHub PR head ref is fetched
-        self.assertTrue(any("pull/42/head" in tok
-                            for a in argvs for tok in a))
+        self.assertEqual(verbs[-1], "diff")      # diff is last
+        self.assertEqual(verbs.count("fetch"), 3)  # base, head, PR ref
+        # base sha, head sha, and the GitHub PR head ref are each fetched
+        self.assertTrue(any(a[1] == "fetch" and "aaa" in a for a in argvs))
+        self.assertTrue(any(a[1] == "fetch" and "bbb" in a for a in argvs))
+        self.assertTrue(any("pull/42/head" in tok for a in argvs for tok in a))
         self.assertIn("diff --git", out)
 
     def test_diff_argv_terminates_user_shas_as_options(self):
-        with mock.patch("pr_resolver._run",
-                        side_effect=["", "", "d\n"]) as m:
+        run = self._fake_run()
+        with mock.patch("pr_resolver._run", side_effect=run):
             pr.resolve_diff(self._record(), repo_dir="/tmp/x")
-        diff_argv = m.call_args_list[-1].args[0]
+        diff_argv = [a for a in run.calls if a[1] == "diff"][-1]
         self.assertEqual(diff_argv[0:2], ["git", "diff"])
         self.assertIn("--end-of-options", diff_argv)
         idx = diff_argv.index("--end-of-options")
         self.assertEqual(diff_argv[idx + 1], "aaa..bbb")
 
+    def test_azure_fetches_pr_merge_ref(self):
+        rec = self._record(provider="azure", repo="org/proj/repo", pr_id="9",
+                            base_sha="a1", head_sha="b1")
+        run = self._fake_run()
+        with mock.patch("pr_resolver._run", side_effect=run):
+            pr.resolve_diff(rec, repo_dir="/tmp/x")
+        self.assertTrue(any("refs/pull/9/merge" in tok
+                            for a in run.calls for tok in a))
+
     def test_bitbucket_fetches_source_branch(self):
         rec = self._record(provider="bitbucket", repo="team/repo",
                             head_ref="feature")
-        with mock.patch("pr_resolver._run",
-                        side_effect=["", "", "d\n"]) as m:
+        run = self._fake_run()
+        with mock.patch("pr_resolver._run", side_effect=run):
             pr.resolve_diff(rec, repo_dir="/tmp/x")
-        argvs = [c.args[0] for c in m.call_args_list]
-        self.assertTrue(any("feature" in tok for a in argvs for tok in a))
+        self.assertTrue(any("feature" in tok for a in run.calls for tok in a))
+
+    def test_local_record_uses_plain_fetch(self):
+        rec = self._record(provider="local", repo="/tmp/x")
+        run = self._fake_run()
+        with mock.patch("pr_resolver._run", side_effect=run):
+            pr.resolve_diff(rec, repo_dir="/tmp/x")
+        fetches = [a for a in run.calls if a[1] == "fetch"]
+        self.assertEqual(fetches, [["git", "fetch", "--quiet"]])  # no SHA args
 
     def test_missing_shas_raise(self):
         with self.assertRaises(pr.ResolverError):
             pr.resolve_diff(self._record(base_sha=""), repo_dir="/tmp/x")
 
-    def test_unreachable_commits_raise_actionable(self):
-        # fetch succeeds but git diff fails because the commits aren't present
-        with mock.patch("pr_resolver._run",
-                        side_effect=["", "",
-                                     pr.ResolverError("bad revision 'bbb'")]):
-            with self.assertRaises(pr.ResolverError):
+    def test_fetch_failure_is_tolerated_when_commits_reachable(self):
+        # Every fetch raises, but the commits are already reachable -> success.
+        run = self._fake_run(fail_fetch=True, reachable=True)
+        with mock.patch("pr_resolver._run", side_effect=run):
+            out = pr.resolve_diff(self._record(), repo_dir="/tmp/x")
+        self.assertIn("diff --git", out)
+
+    def test_unreachable_commit_raises_actionable(self):
+        # Fetches succeed but rev-parse --verify reports the commit absent.
+        run = self._fake_run(reachable=False)
+        with mock.patch("pr_resolver._run", side_effect=run):
+            with self.assertRaises(pr.ResolverError) as ctx:
                 pr.resolve_diff(self._record(), repo_dir="/tmp/x")
+        self.assertIn("not reachable", str(ctx.exception))
+        # the diff step must never run once reachability fails
+        self.assertFalse(any(a[1] == "diff" for a in run.calls))
+
+    def test_empty_diff_for_distinct_shas_raises(self):
+        # git diff returns exit 0 + empty output even though base != head:
+        # that is a silent half-resolve and must fail loudly.
+        run = self._fake_run(diff="   \n")
+        with mock.patch("pr_resolver._run", side_effect=run):
+            with self.assertRaises(pr.ResolverError) as ctx:
+                pr.resolve_diff(self._record(), repo_dir="/tmp/x")
+        self.assertIn("empty diff", str(ctx.exception))
+
+
+class TestNormalizedRequiresFields(unittest.TestCase):
+    def test_empty_sha_field_raises(self):
+        # A provider payload missing a merge commit -> empty base_sha must fail
+        # rather than emit a structurally-valid but semantically-empty record.
+        payload = json.dumps({
+            "baseRefName": "main", "headRefName": "feature",
+            "baseRefOid": "", "headRefOid": "bbb",   # empty base sha
+            "title": "T", "body": "B",
+        })
+        parsed = pr.parse_pr_url("https://github.com/acme/widgets/pull/42")
+        with mock.patch("pr_resolver.shutil.which", return_value="/usr/bin/gh"), \
+             mock.patch("pr_resolver._run", return_value=payload):
+            with self.assertRaises(pr.ResolverError) as ctx:
+                pr.resolve(parsed)
+        self.assertIn("base_sha", str(ctx.exception))
 
 
 class TestMain(unittest.TestCase):
