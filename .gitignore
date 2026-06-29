@@ -1,0 +1,6 @@
+# spec-loop parallel slice worktrees (never commit)
+.worktrees/
+
+# Python cache (release/validation scripts)
+__pycache__/
+*.pyc

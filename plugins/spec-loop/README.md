@@ -251,7 +251,13 @@ re-prompted — update it anytime with:
 | command | `quality-gate`    | View/update the global code-quality gate config (`/spec-loop:quality-gate`) |
 | command | `dashboard`       | Read-only terminal-markdown view of a run — DAG, derived waves, slice status, escalations, decisions (`/spec-loop:dashboard [run-id]`) |
 | command | `dashboard-serve` | Start a local read-only **web** dashboard — a dark-theme single-page UI (overview + drill-down, auto-refresh) over the same run artifacts (`/spec-loop:dashboard-serve [--port N] [--root PATH]`) |
+| command | `peer-review`     | Strictly read-only multi-provider peer-review loop — resolve a real PR (GitHub/Azure DevOps/Bitbucket URL or local `--base/--head`), convene the five `peer-review-*` reviewers + a report-only `pr-review-toolkit` pass via `peer-review-council`, and publish one report under `docs/pr-review/<review-id>/`; never edits, merges, or posts (`/spec-loop:peer-review <requirements> --pr <url>`) |
 | agent   | `spec-loop-slice` | Per-slice worker — creates a clean dedicated worktree up front, then plan→council→(split if too big)→execute→review→quality-gate→merge inside it |
+| agent   | `peer-review-conformance` | Peer-review reviewer — judges the diff against the supplied business requirements |
+| agent   | `peer-review-correctness` | Peer-review reviewer — hunts logic errors and bugs in the diff |
+| agent   | `peer-review-design`      | Peer-review reviewer — judges design, abstraction, and structure |
+| agent   | `peer-review-risk`        | Peer-review reviewer — flags security, data, and irreversibility risk |
+| agent   | `peer-review-tests`       | Peer-review reviewer — judges test coverage of the changed behavior |
 | agent   | `iron-council-skeptic`    | Council member — challenges the premise |
 | agent   | `iron-council-architect`  | Council member — challenges the design |
 | agent   | `iron-council-pragmatist` | Council member — challenges the scope |
@@ -261,6 +267,7 @@ re-prompted — update it anytime with:
 | skill   | `escalation-gate` | The autonomy contract |
 | skill   | `review-depth-map`| Maps a plan's risk tier to how far `review-pr` goes |
 | skill   | `quality-gate`    | Measures changed code vs thresholds; drives the behavior-preserving refactor loop |
+| skill   | `peer-review-council` | Convenes the five `peer-review-*` reviewers + a report-only `pr-review-toolkit` pass and aggregates them into one pinned-schema, report-only review (no fixes, no write-back) |
 
 ## Notes & limitations
 

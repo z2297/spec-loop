@@ -79,18 +79,19 @@ autonomy contract, the Iron Council, components, and limitations.
 │   ├── validate.yml         # CI gate (runs on PRs + pushes to main/beta/alpha)
 │   └── release.yml          # one-button release (workflow_dispatch)
 ├── scripts/
-│   ├── validate_marketplace.py  # self-contained manifest validator
-│   ├── release.py               # release helper (bump + archive + changelog)
-│   ├── dashboard_server.py      # read-only stdlib http.server + run-scan/JSON data layer
-│   ├── test_dashboard_server.py # unittest suite for the dashboard server
-│   └── dashboard_assets/        # self-contained dark-theme web dashboard (index.html)
+│   ├── validate_marketplace.py       # self-contained manifest validator (+ read-only command contract)
+│   ├── test_validate_marketplace.py  # unittest suite for the marketplace validator
+│   ├── release.py                    # release helper (bump + archive + changelog)
+│   ├── dashboard_server.py           # read-only stdlib http.server + run-scan/JSON data layer
+│   ├── test_dashboard_server.py      # unittest suite for the dashboard server
+│   └── dashboard_assets/             # self-contained dark-theme web dashboard (index.html)
 ├── CHANGELOG.md             # version history + channel reference
 ├── plugins/
 │   └── spec-loop/           # the plugin
 │       ├── .claude-plugin/plugin.json
-│       ├── commands/        # /spec-loop controller, /spec-loop:quality-gate config, /spec-loop:dashboard terminal view, /spec-loop:dashboard-serve web view
-│       ├── agents/          # spec-loop-slice worker + 5 iron-council members
-│       ├── skills/          # iron-council, escalation-gate, review-depth-map, quality-gate
+│       ├── commands/        # /spec-loop controller, /spec-loop:quality-gate config, /spec-loop:dashboard terminal view, /spec-loop:dashboard-serve web view, /spec-loop:peer-review read-only PR review
+│       ├── agents/          # spec-loop-slice worker + 5 iron-council members + 5 peer-review-* reviewers
+│       ├── skills/          # iron-council, escalation-gate, review-depth-map, quality-gate, peer-review-council
 │       └── README.md
 ├── LICENSE
 └── README.md
