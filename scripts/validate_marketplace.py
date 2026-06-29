@@ -17,6 +17,12 @@ from pathlib import Path
 
 KEBAB = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
+# A command is treated as read-only if any of these phrases appears in its text
+# (frontmatter or prose). This is best-effort keyword detection — it raises the
+# floor under the convention, it is not a sandbox: a command that grants Edit but
+# avoids these phrases will not be caught. Read-only commands must not grant Edit.
+READONLY_MARKERS = ("read-only", "read only", "never edits")
+
 
 class Validator:
     def __init__(self, root: Path):
@@ -188,12 +194,37 @@ class Validator:
             if fm is None:
                 continue
             self.require_keys(cmd, fm, ["description"])
+            self.check_readonly_no_edit(cmd, fm)
 
         for agent in sorted(plugin_dir.glob("agents/*.md")):
             fm = self.read_frontmatter(agent)
             if fm is None:
                 continue
             self.require_keys(agent, fm, ["name", "description"])
+
+    def check_readonly_no_edit(self, cmd: Path, fm: dict) -> None:
+        """A command marked read-only (by frontmatter or prose) must not grant
+        `Edit` in its `allowed-tools`. Detection is best-effort keyword matching;
+        the Edit check reads the frontmatter value only, so prose that merely
+        mentions Edit (e.g. 'allowed-tools excludes Edit') is not a false positive."""
+        text = cmd.read_text().lower()
+        if not any(marker in text for marker in READONLY_MARKERS):
+            return
+        tools = self._allowed_tools(fm)
+        if "Edit" in tools:
+            self.err(
+                f"{self._rel(cmd)}: command is marked read-only but its "
+                f"'allowed-tools' grants 'Edit'"
+            )
+
+    @staticmethod
+    def _allowed_tools(fm: dict) -> set[str]:
+        """Extract the quoted tool tokens from a frontmatter `allowed-tools` value
+        (a one-line JSON-ish array). Returns an empty set when absent/unparsable."""
+        raw = fm.get("allowed-tools")
+        if not isinstance(raw, str):
+            return set()
+        return set(re.findall(r'"([^"]+)"', raw))
 
     def read_frontmatter(self, path: Path):
         """Return a dict of top-level frontmatter keys, or None (recording an

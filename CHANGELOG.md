@@ -34,6 +34,18 @@ prior build. Pinned entries map to git tags `v<version>`.
   ETag/304) and a freshness indicator. Strictly read-only (`GET`/`HEAD` only, `127.0.0.1`
   bind, no mutation endpoints). Launch it with the new `/spec-loop:dashboard-serve`
   command, which starts `scripts/dashboard_server.py` and prints the local URL.
+- `/spec-loop:peer-review` — a strictly **read-only** multi-provider peer-review loop. It
+  resolves a real pull request (GitHub / Azure DevOps / Bitbucket URL, or an explicit local
+  `--base/--head` ref-range) and materializes its diff read-only via `scripts/pr_resolver.py`,
+  then convenes five `peer-review-*` reviewers (`peer-review-conformance`, `-correctness`,
+  `-design`, `-risk`, `-tests`) plus a report-only `pr-review-toolkit:review-pr` pass through
+  the new `peer-review-council` skill, and publishes **one** pinned-schema report at
+  `docs/pr-review/<review-id>/review-report.md`. It changes no implementation — there is no
+  auto-fix loop, no `simplify` pass, no quality-gate, and no provider write-back (commenting /
+  approving / merging is a deliberate future follow-on). The command's read-only contract is
+  now machine-enforced: `scripts/validate_marketplace.py` asserts that any command marked
+  read-only (including this one and the two dashboard commands) does not grant `Edit` in its
+  `allowed-tools`.
 
 ## [1.0.0] - 2026-06-25
 ### Added
