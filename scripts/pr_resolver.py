@@ -159,6 +159,143 @@ def _parse_azure_path(segs: list, host: str, url: str):
     return f"{org}/{project}/{repo_name}", pr_id
 
 
+def _run(argv, *, cwd=None) -> str:
+    """Run a READ-ONLY command via list-args (shell=False). Sole subprocess
+    entry point -- keeps the no-shell-injection guarantee provable in one place.
+    Never includes a secret in argv, so its error text never leaks one."""
+    try:
+        proc = subprocess.run(
+            argv, cwd=cwd, shell=False,
+            capture_output=True, text=True, check=False,
+        )
+    except FileNotFoundError as exc:
+        raise ResolverError(
+            f"required command not found: {argv[0]!r} ({exc})"
+        ) from exc
+    if proc.returncode != 0:
+        raise ResolverError(
+            f"command failed ({argv[0]} exit {proc.returncode}): "
+            f"{proc.stderr.strip() or proc.stdout.strip()}"
+        )
+    return proc.stdout
+
+
+def _http_get(url, headers=None) -> bytes:
+    """HTTP GET via urllib (READ-only; never sets a body or mutating method).
+    Errors reference only the URL -- the bearer token rides in the header, so it
+    never appears in an exception message."""
+    req = urllib.request.Request(url, headers=headers or {}, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as exc:
+        raise ResolverError(f"HTTP {exc.code} fetching {url}: {exc.reason}") from exc
+    except urllib.error.URLError as exc:
+        raise ResolverError(f"network error fetching {url}: {exc.reason}") from exc
+
+
+def _strip_ref(ref):
+    """refs/heads/main -> main (Azure returns fully-qualified ref names)."""
+    return (ref or "").removeprefix("refs/heads/")
+
+
+def _normalized(parsed, *, base_ref, base_sha, head_ref, head_sha,
+                title, description):
+    return {
+        "provider": parsed["provider"],
+        "host": parsed["host"],
+        "repo": parsed["repo"],
+        "pr_id": parsed["pr_id"],
+        "base_ref": base_ref,
+        "base_sha": base_sha,
+        "head_ref": head_ref,
+        "head_sha": head_sha,
+        "title": title,
+        "description": description,
+        "web_url": parsed["web_url"],
+    }
+
+
+def resolve(parsed: dict) -> dict:
+    """Resolve a parsed PR READ-ONLY to the normalized record. Dispatches to the
+    per-provider resolver; each prefers the official CLI / REST and FAILS with an
+    actionable message when its CLI/credential is absent (never half-resolves)."""
+    return {
+        "github": _resolve_github,
+        "azure": _resolve_azure,
+        "bitbucket": _resolve_bitbucket,
+    }[parsed["provider"]](parsed)
+
+
+def _resolve_github(parsed: dict) -> dict:
+    if not shutil.which("gh"):
+        raise ResolverError(
+            "GitHub CLI 'gh' not found. Install it and run `gh auth login`."
+        )
+    fields = "baseRefName,headRefName,baseRefOid,headRefOid,title,body"
+    out = _run([
+        "gh", "pr", "view", validate_pr_id(parsed["pr_id"]),
+        "--repo", parsed["repo"], "--json", fields,
+    ])
+    d = json.loads(out)
+    return _normalized(
+        parsed,
+        base_ref=d.get("baseRefName", ""), base_sha=d.get("baseRefOid", ""),
+        head_ref=d.get("headRefName", ""), head_sha=d.get("headRefOid", ""),
+        title=d.get("title", ""), description=d.get("body", ""),
+    )
+
+
+def _resolve_azure(parsed: dict) -> dict:
+    if not shutil.which("az"):
+        raise ResolverError(
+            "Azure CLI 'az' not found. Install it (with the azure-devops "
+            "extension) and run `az login`."
+        )
+    org, project, repo = parsed["repo"].split("/", 2)
+    org_url = (f"https://{org}.visualstudio.com"
+               if parsed["host"].endswith(".visualstudio.com")
+               else f"https://dev.azure.com/{org}")
+    out = _run([
+        "az", "repos", "pr", "show",
+        "--id", validate_pr_id(parsed["pr_id"]),
+        "--org", org_url, "--output", "json",
+    ])
+    d = json.loads(out)
+    return _normalized(
+        parsed,
+        base_ref=_strip_ref(d.get("targetRefName")),
+        base_sha=(d.get("lastMergeTargetCommit") or {}).get("commitId", ""),
+        head_ref=_strip_ref(d.get("sourceRefName")),
+        head_sha=(d.get("lastMergeSourceCommit") or {}).get("commitId", ""),
+        title=d.get("title", ""), description=d.get("description", ""),
+    )
+
+
+def _resolve_bitbucket(parsed: dict) -> dict:
+    token = os.environ.get("BITBUCKET_TOKEN")
+    if not token:
+        raise ResolverError(
+            "Bitbucket access requires the BITBUCKET_TOKEN environment "
+            "variable (an app password / access token with PR read scope)."
+        )
+    api = (
+        f"https://api.bitbucket.org/2.0/repositories/{parsed['repo']}"
+        f"/pullrequests/{validate_pr_id(parsed['pr_id'])}"
+    )
+    raw = _http_get(api, headers={"Authorization": f"Bearer {token}"})
+    d = json.loads(raw.decode("utf-8"))
+    src, dst = d.get("source") or {}, d.get("destination") or {}
+    return _normalized(
+        parsed,
+        base_ref=(dst.get("branch") or {}).get("name", ""),
+        base_sha=(dst.get("commit") or {}).get("hash", ""),
+        head_ref=(src.get("branch") or {}).get("name", ""),
+        head_sha=(src.get("commit") or {}).get("hash", ""),
+        title=d.get("title", ""), description=d.get("description", ""),
+    )
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="Read-only PR resolver (Azure DevOps / GitHub / Bitbucket).")
@@ -172,9 +309,8 @@ def main(argv=None) -> int:
 
     try:
         if args.url:
-            record = parse_pr_url(args.url)
+            record = resolve(parse_pr_url(args.url))
         elif args.base and args.head:
-            record = None  # local mode wired up in a later task
             raise ResolverError("local --base/--head mode not yet implemented")
         else:
             raise ResolverError(
