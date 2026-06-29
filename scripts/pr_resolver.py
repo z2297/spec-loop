@@ -214,47 +214,42 @@ def _is_remote(record) -> bool:
     return record.get("provider") not in (None, "", "local")
 
 
-def _normalized(*, provider, host, repo, pr_id, web_url,
-                base_ref, base_sha, head_ref, head_sha,
-                title, description):
-    """Build the 10-field normalized record -- the single source of truth for
-    the inter-slice JSON contract shape. Every resolver (remote and local) goes
-    through here so the shape can never drift between construction paths.
+# The ordered keys of the normalized record -- the single source of truth for
+# the inter-slice JSON contract shape. Split into identity fields (who/where the
+# PR is) and content fields (its resolved refs/commits/text).
+_IDENTITY_FIELDS = ("provider", "host", "repo", "pr_id", "web_url")
+_CONTENT_FIELDS = ("base_ref", "base_sha", "head_ref", "head_sha",
+                   "title", "description")
+# Empty in any of these is a half-resolve (the contract forbids it); title and
+# description may legitimately be empty.
+_REQUIRED_FIELDS = ("base_ref", "base_sha", "head_ref", "head_sha")
 
-    The base/head ref+sha fields are load-bearing (downstream diffing depends on
-    them), so an empty one means the provider returned an incomplete PR (e.g. an
-    abandoned/unmerged PR with no merge commit, or a partial API response) -- a
-    half-resolve, which the contract forbids. title/description are allowed to be
-    empty (an empty PR description is legitimate)."""
-    rec = {
-        "provider": provider,
-        "host": host,
-        "repo": repo,
-        "pr_id": pr_id,
-        "base_ref": base_ref,
-        "base_sha": base_sha,
-        "head_ref": head_ref,
-        "head_sha": head_sha,
-        "title": title,
-        "description": description,
-        "web_url": web_url,
-    }
-    for field in ("base_ref", "base_sha", "head_ref", "head_sha"):
+
+def _normalized(identity: dict, content: dict) -> dict:
+    """Build the 10-field normalized record from an identity dict (provider/host/
+    repo/pr_id/web_url) and a content dict (base/head ref+sha, title,
+    description). Every resolver (remote and local) goes through here so the
+    contract shape can never drift between construction paths.
+
+    A required field that is empty means the provider returned an incomplete PR
+    (e.g. an abandoned/unmerged PR with no merge commit, or a partial API
+    response) -- a half-resolve, which the contract forbids."""
+    rec = {k: identity[k] for k in _IDENTITY_FIELDS}
+    rec.update({k: content[k] for k in _CONTENT_FIELDS})
+    for field in _REQUIRED_FIELDS:
         if not rec[field]:
             raise ResolverError(
-                f"provider {provider!r} returned a PR record with empty "
+                f"provider {rec['provider']!r} returned a PR record with empty "
                 f"{field!r}; cannot resolve (the PR may be abandoned/unmerged, "
                 "or the API/CLI response was incomplete)"
             )
     return rec
 
 
-def _normalized_remote(parsed, **fields):
-    """Convenience wrapper: build a normalized record from a parsed remote PR
-    (provider/host/repo/pr_id/web_url) plus the resolved ref/sha/title fields."""
-    return _normalized(
-        provider=parsed["provider"], host=parsed["host"], repo=parsed["repo"],
-        pr_id=parsed["pr_id"], web_url=parsed["web_url"], **fields)
+def _normalized_remote(parsed: dict, **content) -> dict:
+    """Build a normalized record from a parsed remote PR (its identity fields)
+    plus the resolved content fields (base/head ref+sha, title, description)."""
+    return _normalized(parsed, content)
 
 
 def _parse_json(raw, provider):
@@ -357,11 +352,12 @@ def resolve_local(base, head, repo_dir=".") -> dict:
         ["git", "rev-parse", "--end-of-options", base], cwd=repo_dir).strip()
     head_sha = _run(
         ["git", "rev-parse", "--end-of-options", head], cwd=repo_dir).strip()
-    return _normalized(
-        provider="local", host="", repo=repo_dir, pr_id="", web_url="",
-        base_ref=base, base_sha=base_sha, head_ref=head, head_sha=head_sha,
-        title="", description="",
-    )
+    identity = {"provider": "local", "host": "", "repo": repo_dir,
+                "pr_id": "", "web_url": ""}
+    content = {"base_ref": base, "base_sha": base_sha,
+               "head_ref": head, "head_sha": head_sha,
+               "title": "", "description": ""}
+    return _normalized(identity, content)
 
 
 def _pr_head_refspec(record) -> str | None:
@@ -394,49 +390,32 @@ def _commit_is_reachable(sha, repo_dir) -> bool:
         return False
 
 
-def resolve_diff(record, repo_dir=".") -> str:
-    """Materialize base..head as a local unified diff (returned as TEXT) so a
-    downstream reviewer sees identical bytes. READ verbs only.
+def _fetch_argvs(record, base, head) -> list:
+    """The READ-only `git fetch` commands that make base/head reachable locally.
+    For a remote PR: fetch the base + head SHAs directly plus the provider PR
+    head ref (which covers a fork/unfetched head a server refuses to serve by
+    bare SHA). For a local record: a plain fetch refreshing existing remotes.
+    Each user-derived ref is option-terminated so it can never be a git flag."""
+    if not _is_remote(record):
+        return [["git", "fetch", "--quiet"]]
+    targets = [base, head]
+    refspec = _pr_head_refspec(record)
+    if refspec:
+        targets.append(refspec)
+    return [["git", "fetch", "--quiet", "origin", "--end-of-options", t]
+            for t in targets]
 
-    A plain `git fetch` leaves a remote/fork PR's commits unreachable, so this
-    fetches the base SHA, the head SHA, and the provider-specific PR head ref,
-    then VERIFIES that both commits are reachable before diffing. If either
-    commit is unreachable -- or the diff is empty despite distinct base/head --
-    it raises an actionable ResolverError rather than emitting a partial/empty
-    diff (never half-resolves). Every user-derived SHA in a git argv is
-    option-terminated so it can never be parsed as a flag."""
-    base, head = record.get("base_sha"), record.get("head_sha")
-    if not base or not head:
-        raise ResolverError("record is missing base_sha/head_sha; cannot diff")
 
-    fetches = []
-    if _is_remote(record):
-        # Fetch the base and head commits directly, plus the PR head ref (which
-        # makes a fork/unfetched head reachable when fetching the bare SHA is
-        # refused by the server).
-        fetches.append(["git", "fetch", "--quiet", "origin",
-                        "--end-of-options", base])
-        fetches.append(["git", "fetch", "--quiet", "origin",
-                        "--end-of-options", head])
-        refspec = _pr_head_refspec(record)
-        if refspec:
-            fetches.append(["git", "fetch", "--quiet", "origin",
-                            "--end-of-options", refspec])
-    else:
-        # Local record: a plain fetch refreshes whatever remotes exist.
-        fetches.append(["git", "fetch", "--quiet"])
-
-    for argv in fetches:
+def _materialize_commits(record, base, head, repo_dir) -> None:
+    """Best-effort fetch, then VERIFY both commits are reachable. A single failed
+    fetch (no network, a server refusing bare-SHA fetches, a missing PR ref) is
+    tolerated -- the explicit reachability check, not any one fetch, is the
+    authoritative gate, so this still fails loudly if a commit is truly absent."""
+    for argv in _fetch_argvs(record, base, head):
         try:
             _run(argv, cwd=repo_dir)
         except ResolverError:
-            # A single failed fetch (no network, a server that refuses bare-SHA
-            # fetches, a missing PR ref) is tolerated here: the explicit
-            # reachability check below -- not any one fetch -- is the
-            # authoritative gate, so the function still fails loudly if the
-            # commits are genuinely absent.
             pass
-
     for label, sha in (("base", base), ("head", head)):
         if not _commit_is_reachable(sha, repo_dir):
             raise ResolverError(
@@ -445,6 +424,21 @@ def resolve_diff(record, repo_dir=".") -> str:
                 "is a clone of the same repository and the PR head ref is "
                 "fetchable."
             )
+
+
+def resolve_diff(record, repo_dir=".") -> str:
+    """Materialize base..head as a local unified diff (returned as TEXT) so a
+    downstream reviewer sees identical bytes. READ verbs only.
+
+    Fetches and verifies both commits are reachable (see _materialize_commits)
+    before diffing; raises an actionable ResolverError rather than emitting a
+    partial/empty diff if either commit is unreachable, or the diff is empty
+    despite distinct base/head (never half-resolves)."""
+    base, head = record.get("base_sha"), record.get("head_sha")
+    if not base or not head:
+        raise ResolverError("record is missing base_sha/head_sha; cannot diff")
+
+    _materialize_commits(record, base, head, repo_dir)
 
     diff_text = _run(
         ["git", "diff", "--end-of-options", f"{base}..{head}"], cwd=repo_dir)
