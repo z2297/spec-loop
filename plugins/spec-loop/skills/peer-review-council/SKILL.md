@@ -1,6 +1,6 @@
 ---
 name: peer-review-council
-description: Use when the peer-review controller has a real, already-merged-or-open PR (a resolved diff/target) and a set of user-supplied business requirements to vet — convenes the five diff-facing peer-review reviewers plus a report-only pr-review-toolkit pass, merges and de-duplicates their findings onto one P0/P1/P2 severity scale, and writes a single pinned-schema review report. Read-only and advisory: it never edits code, never posts to a provider, never merges; the published report IS the human surface (no OBJECT/SPLIT routing, no DAG, no escalation-gate / AskUserQuestion).
+description: "Use when the peer-review controller has a real, already-merged-or-open PR (a resolved diff/target) and a set of user-supplied business requirements to vet — convenes the five diff-facing peer-review reviewers plus a report-only pr-review-toolkit pass, merges and de-duplicates their findings onto one P0/P1/P2 severity scale, and writes a single pinned-schema review report. Read-only and advisory: it never edits code, never posts to a provider, never merges; the published report IS the human surface (no OBJECT/SPLIT routing, no DAG, no escalation-gate / AskUserQuestion)."
 ---
 
 # The Peer-Review Council — review a real diff, publish one report

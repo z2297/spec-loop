@@ -1,6 +1,6 @@
 ---
 name: peer-review-correctness
-description: The Peer-Review Council's Correctness reviewer — judges whether what a real PR diff does is internally sound: bugs, logic errors, edge cases, and broken invariants, independent of the spec. Diff-facing, post-effort, read-only and advisory; never edits, posts, merges, or runs mutating commands.
+description: "The Peer-Review Council's Correctness reviewer — judges whether what a real PR diff does is internally sound: bugs, logic errors, edge cases, and broken invariants, independent of the spec. Diff-facing, post-effort, read-only and advisory; never edits, posts, merges, or runs mutating commands."
 tools: Read, Grep, Glob, Bash
 model: inherit
 color: cyan
