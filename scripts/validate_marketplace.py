@@ -226,10 +226,44 @@ class Validator:
             return set()
         return set(re.findall(r'"([^"]+)"', raw))
 
+    @staticmethod
+    def _frontmatter_value_error(key: str, value: str) -> str | None:
+        """Targeted heuristic for the one YAML-frontmatter breakage class that this
+        regex parser would otherwise miss: an UNQUOTED top-level scalar containing
+        ': ' (colon-space). Real YAML reads that as a nested mapping and rejects it
+        in scalar position, so a value like `description: do X: then Y` loads empty
+        (or errors) under the authoritative `claude plugin validate` while passing a
+        naive key-presence check. Quoting the value is exactly the fix YAML wants,
+        so a value wrapped in MATCHING single/double quotes is always safe — even
+        when it contains ': '.
+
+        `value` is the already-trailing-stripped capture from read_frontmatter (the
+        line regex consumes leading whitespace, and .strip() removes trailing spaces
+        and any CRLF \\r), which keeps the quote check robust on CRLF-checked-out
+        files. Returns an error string naming the key, or None when the value is fine.
+
+        This is deliberately NOT a YAML parser: it catches only the colon-space class
+        that actually shipped past this gate. Other YAML-rejection classes (e.g. a
+        bare leading '[' opening a flow sequence, quoted-then-trailing content like
+        '"x" y', duplicate keys) are left to CI's `claude plugin validate`, which
+        remains the authoritative frontmatter gate. An empty value is left to the
+        existing require_keys presence check, not flagged here."""
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            return None  # properly quoted -> safe, even if it contains ': '
+        if ": " in value:
+            return (
+                f"frontmatter value for '{key}' contains ': ' and must be quoted "
+                f"(unquoted YAML reads it as a nested mapping; "
+                f"CI's `claude plugin validate` rejects it)"
+            )
+        return None
+
     def read_frontmatter(self, path: Path):
         """Return a dict of top-level frontmatter keys, or None (recording an
         error) if the leading --- block is missing. Minimal parser: top-level
-        'key:' lines only — enough to assert required keys are present."""
+        'key:' lines only — enough to assert required keys are present, plus a
+        targeted check (via _frontmatter_value_error) for the unquoted-colon-space
+        value class that real YAML rejects but key-presence parsing would miss."""
         text = path.read_text()
         if not text.startswith("---"):
             self.err(f"{self._rel(path)}: missing YAML frontmatter (--- block)")
@@ -244,7 +278,11 @@ class Validator:
             # only top-level keys (no leading whitespace), of the form key: value
             m = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", line)
             if m:
-                keys[m.group(1)] = m.group(2).strip()
+                key, value = m.group(1), m.group(2).strip()
+                keys[key] = value
+                value_err = self._frontmatter_value_error(key, value)
+                if value_err:
+                    self.err(f"{self._rel(path)}: {value_err}")
         return keys
 
     def require_keys(self, path: Path, fm: dict, keys: list[str]) -> None:
