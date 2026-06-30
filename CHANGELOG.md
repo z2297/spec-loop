@@ -22,6 +22,8 @@ version with dashes instead of dots, since plugin names are kebab-case
 prior build. Pinned entries map to git tags `v<version>`.
 
 ## [Unreleased]
+
+## [1.2.0] - 2026-06-29
 ### Added
 - `/spec-loop:dashboard` — a read-only slash command that renders a terminal-markdown
   dashboard of a spec-loop run (DAG, derived waves, per-slice status, open escalations,
@@ -75,7 +77,8 @@ prior build. Pinned entries map to git tags `v<version>`.
 - Post-review code-quality gate: an objective complexity/length/CRAP metric gate
   with a bounded, behavior-preserving refactor loop before merge.
 
-[Unreleased]: https://github.com/z2297/spec-loop/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/z2297/spec-loop/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/z2297/spec-loop/releases/tag/v1.2.0
 [1.0.0]: https://github.com/z2297/spec-loop/releases/tag/v1.0.0
 [0.4.0]: https://github.com/z2297/spec-loop/releases/tag/v0.4.0
 [0.3.0]: https://github.com/z2297/spec-loop/releases/tag/v0.3.0
