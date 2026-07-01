@@ -127,6 +127,41 @@ class TestParsePrUrl(unittest.TestCase):
             with self.assertRaises(pr.ResolverError):
                 pr.parse_pr_url(bad)
 
+    def test_bitbucket_wrong_path_segment_rejected(self):
+        # A bitbucket.org URL whose 3rd segment is NOT 'pull-requests' is not a
+        # PR URL and must raise, naming Bitbucket (pr_resolver.py L132).
+        with self.assertRaises(pr.ResolverError) as ctx:
+            pr.parse_pr_url("https://bitbucket.org/team/repo/wrong/7")
+        self.assertIn("Bitbucket", str(ctx.exception))
+
+    def test_azure_missing_id_after_pullrequest_rejected(self):
+        # 'pullrequest' is the last segment, so there is no id after it
+        # (pi + 1 >= len(segs)) -> raises, naming Azure DevOps (L153).
+        with self.assertRaises(pr.ResolverError) as ctx:
+            pr.parse_pr_url(
+                "https://dev.azure.com/org/proj/_git/repo/pullrequest")
+        self.assertIn("Azure DevOps", str(ctx.exception))
+
+    def test_azure_git_as_first_segment_rejected(self):
+        # '_git' is the very first path segment, so gi < 1 -> raises (L153):
+        # there is no org/project preceding it. Uses the .visualstudio.com form
+        # (org is the SUBDOMAIN, so the dev.azure.com-specific gi < 2 guard at
+        # L161 does not apply) -- here gi < 1 is the ONLY guard that can fire, so
+        # the test genuinely pins that sub-clause rather than relying on L161.
+        with self.assertRaises(pr.ResolverError) as ctx:
+            pr.parse_pr_url(
+                "https://org.visualstudio.com/_git/repo/pullrequest/9")
+        self.assertIn("Azure DevOps", str(ctx.exception))
+
+    def test_azure_dev_azure_missing_org_rejected(self):
+        # dev.azure.com needs BOTH an org (first segment) and a project before
+        # '_git'. Here gi == 1 (only the project precedes _git, no org), so the
+        # dev.azure.com-specific gi < 2 guard raises (pr_resolver.py L161).
+        with self.assertRaises(pr.ResolverError) as ctx:
+            pr.parse_pr_url(
+                "https://dev.azure.com/proj/_git/repo/pullrequest/9")
+        self.assertIn("Azure DevOps", str(ctx.exception))
+
     def test_leading_dash_segment_rejected(self):
         # An owner/repo/org segment beginning with '-' could be read as a flag
         # (argument injection); reject it at parse time (Guardian concern).
@@ -283,6 +318,62 @@ class TestMalformedPayload(unittest.TestCase):
             with self.assertRaises(pr.ResolverError) as ctx:
                 pr.resolve(parsed)
         self.assertIn("not valid JSON", str(ctx.exception))
+
+
+# --------------------------------------------------------------------------
+# _http_get success + HTTP-error paths (slice s8)
+#
+# TestTokenNeverLeaks below already exercises the urllib.error.URLError arm of
+# _http_get (via _resolve_bitbucket). These pin the two SIBLING branches it
+# never reaches: the resp.read() SUCCESS return, and the urllib.error.HTTPError
+# arm. urlopen is mocked, so no real request is ever issued.
+# --------------------------------------------------------------------------
+
+class TestHttpGet(unittest.TestCase):
+    def _urlopen_cm(self, body: bytes):
+        """A context-manager stand-in for urlopen's response whose read()
+        yields `body` -- matches _http_get's `with urlopen(...) as resp`."""
+        cm = mock.MagicMock()
+        cm.__enter__.return_value.read.return_value = body
+        return cm
+
+    def test_success_returns_response_bytes_via_get(self):
+        body = b'{"ok": true}'
+        with mock.patch("pr_resolver.urllib.request.urlopen",
+                        return_value=self._urlopen_cm(body)) as m:
+            out = pr._http_get("https://api.example.com/x",
+                               headers={"Authorization": "Bearer x"})
+        self.assertEqual(out, body)               # returns resp.read() verbatim
+        req = m.call_args.args[0]                  # the urllib Request object
+        self.assertEqual(req.get_method(), "GET")  # READ-only: never mutating
+
+    def _http_error(self, url, code, reason):
+        """A closed-on-teardown HTTPError. HTTPError owns an internal file
+        object; closing it avoids a ResourceWarning at GC time."""
+        err = urllib.error.HTTPError(url, code, reason, {}, None)
+        self.addCleanup(err.close)
+        return err
+
+    def test_http_error_raises_actionable_with_code_and_url(self):
+        url = "https://api.example.com/missing"
+        err = self._http_error(url, 404, "Not Found")
+        with mock.patch("pr_resolver.urllib.request.urlopen", side_effect=err):
+            with self.assertRaises(pr.ResolverError) as ctx:
+                pr._http_get(url)
+        msg = str(ctx.exception)
+        self.assertIn("HTTP 404", msg)
+        self.assertIn(url, msg)
+
+    def test_http_error_message_never_leaks_auth_header(self):
+        # A secret riding in the Authorization header must never surface in the
+        # raised error text, even when the fetch fails with an HTTPError.
+        secret = "s3cr3t-bearer-value"
+        url = "https://api.example.com/missing"
+        err = self._http_error(url, 403, "Forbidden")
+        with mock.patch("pr_resolver.urllib.request.urlopen", side_effect=err):
+            with self.assertRaises(pr.ResolverError) as ctx:
+                pr._http_get(url, headers={"Authorization": f"Bearer {secret}"})
+        self.assertNotIn(secret, str(ctx.exception))
 
 
 class TestTokenNeverLeaks(unittest.TestCase):
@@ -461,6 +552,41 @@ class TestResolveDiff(unittest.TestCase):
             with self.assertRaises(pr.ResolverError) as ctx:
                 pr.resolve_diff(self._record(), repo_dir="/tmp/x")
         self.assertIn("empty diff", str(ctx.exception))
+
+
+# --------------------------------------------------------------------------
+# _pr_head_refspec: the provider PR-head refspec (slice s8)
+#
+# The positive github/azure/bitbucket refspec branches are already exercised
+# indirectly by TestResolveDiff (pull/42/head, refs/pull/9/merge, the bitbucket
+# source branch). This pins the function directly and, crucially, covers the
+# L384 `return None` tail -- a record with no matching provider/pr_id/head_ref.
+# --------------------------------------------------------------------------
+
+class TestPrHeadRefspec(unittest.TestCase):
+    def test_github_and_azure_and_bitbucket_positive_refspecs(self):
+        self.assertEqual(
+            pr._pr_head_refspec({"provider": "github", "pr_id": "42"}),
+            "pull/42/head")
+        self.assertEqual(
+            pr._pr_head_refspec({"provider": "azure", "pr_id": "9"}),
+            "refs/pull/9/merge")
+        self.assertEqual(
+            pr._pr_head_refspec(
+                {"provider": "bitbucket", "head_ref": "feature"}),
+            "feature")
+
+    def test_returns_none_when_no_provider_ref_applies(self):
+        # A local record, and remote records missing the field each provider
+        # needs, all fall through to the `return None` tail (pr_resolver L384).
+        for rec in (
+            {"provider": "local"},
+            {"provider": "github", "pr_id": ""},        # github needs pr_id
+            {"provider": "azure", "pr_id": ""},         # azure needs pr_id
+            {"provider": "bitbucket", "head_ref": ""},  # bitbucket needs head_ref
+            {},                                          # no provider at all
+        ):
+            self.assertIsNone(pr._pr_head_refspec(rec))
 
 
 class TestNormalizedRequiresFields(unittest.TestCase):
