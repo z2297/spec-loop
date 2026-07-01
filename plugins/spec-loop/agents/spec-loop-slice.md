@@ -31,8 +31,12 @@ use `run_in_background: false`.
   `depth` is the split generation (intake slices = `0`); `parent` is the slice you
   were split from (or `null`). These bound dynamic decomposition (Step 1.6).
 - `run-id` and the absolute path to the run-state directory `docs/spec-loop/<run-id>/`.
-- `base_ref` — the integration branch to branch your worktree from (defaults to
-  the branch the controller is on).
+- `base_ref` — the singular **integration branch** the controller created for this
+  run; branch your worktree from its current tip. You never merge into `main`/`master`.
+- `merge_mode` — `single-branch` (default) or `per-slice-pr`. In `single-branch` mode
+  you do **not** merge, push, or open a PR — you finish as a verified, committed
+  branch and the **controller** merges it into the integration branch. In
+  `per-slice-pr` mode you open your own PR in Step 5.
 - The absolute path to the quality-gate config
   (`~/.claude/spec-loop/quality-gate.json`) for Step 4c.
 - Optionally, an injected human answer if you are a re-dispatch of a paused slice.
@@ -213,11 +217,22 @@ configured thresholds.
   → write to `escalations.md` → return `NEEDS_DECISION`. Never weaken thresholds or
   edit the config to force a pass.
 
-### Step 5. Verify & finish
+### Step 5. Verify & finish (do NOT self-merge in single-branch mode)
 Enforce `superpowers:verification-before-completion`: run the full test/build
-command fresh and read the output. Only with passing evidence, use
-`superpowers:finishing-a-development-branch` to merge or open a PR for the slice
-branch.
+command fresh and read the output. Proceed only with passing evidence. How you
+finish depends on `merge_mode`:
+
+- **`single-branch` mode (default).** Ensure ALL work is **committed** on your slice
+  branch (`spec-loop/<run-id>/<slice-id>`). Then **stop**: do NOT merge, do NOT push,
+  do NOT open a PR, and do NOT remove your worktree or delete your branch. Your
+  verified, committed branch *is* your deliverable — the **controller** merges it into
+  the singular integration branch and cleans up your worktree at the wave boundary.
+  Skip `finishing-a-development-branch` entirely here; self-merging would race with
+  sibling slices landing on the same branch and is what this mode exists to prevent.
+- **`per-slice-pr` mode (only when the controller passes it).** Use
+  `superpowers:finishing-a-development-branch` and choose **push + open a PR**,
+  passing that as a declared preference (you run in the background and cannot answer a
+  prompt). Never fall back to a local merge in this mode.
 
 ### Step 6. Report (≤ 15 lines)
 Write a full report to `docs/spec-loop/<run-id>/slice-<slice-id>-report.md`, then
@@ -244,6 +259,9 @@ Open escalations: <none | titles written to escalations.md>
   dedicated worktree exists and you have `cd`'d into it.
 - Wiping an existing worktree on a resume/re-dispatch that has committed progress.
 - Working on `main`/`master`, or outside your worktree.
+- Self-merging, pushing, opening a PR, or removing your own worktree/branch in
+  `single-branch` mode — the controller owns the integration merge. (Only
+  `per-slice-pr` mode opens a PR, and only via `finishing-a-development-branch`.)
 - Writing a plan that covers more than this one slice.
 - Executing a plan before the Iron Council has reviewed it (Step 1.5), or executing
   one the council OBJECTED to instead of escalating.

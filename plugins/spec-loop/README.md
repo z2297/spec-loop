@@ -28,7 +28,14 @@ when it genuinely cannot decide.
   (`iron-council`) → `superpowers:subagent-driven-development`
   (falls back to `executing-plans` if nested subagents aren't available) →
   `pr-review-toolkit:review-pr` scoped to the plan's risk tier → a bounded auto-fix
-  loop → `superpowers:verification-before-completion` → `finishing-a-development-branch`.
+  loop → `superpowers:verification-before-completion` → hand the verified branch back
+  to the controller.
+- **Single-branch integration** — every slice merges into **one** dedicated local
+  integration branch. Slices never self-merge or open their own PRs; the controller
+  merges each verified slice branch **serially** (race-free) and deletes it. The run
+  ends by prompting you to push the branch as a feature branch or merge it onto
+  `main`. A branch/PR *per slice* happens only with `--per-slice-pr` or an explicit
+  request — never by default.
 - **Autonomy contract** (`escalation-gate`): proceed-and-log by default; interrupt
   you only on (1) genuine ambiguity, (2) a material assumption, (3) a review
   BLOCK that survives the auto-fix loop, or (4) an Iron Council objection.
@@ -85,7 +92,19 @@ After installing, start a new session (or run `/reload-plugins`).
 Flags:
 - `--max-parallel N` — max concurrent slices (default 5).
 - `--risk-floor 1|2|3` — minimum review tier for the whole run (default 1).
+- `--branch <name>` — name of the singular integration branch every slice merges
+  into (default: a meaningful slug of the request; never contains `spec-loop`).
+- `--base-branch <name>` — branch the integration branch is cut from (default `main`,
+  else `master`).
+- `--per-slice-pr` — opt into a branch/PR **per slice** instead of the default
+  single-branch merge (also triggered by explicitly asking for it in the request).
 - `--resume <run-id>` — continue a previous run.
+
+**Branch model.** By default all slices merge into **one** dedicated local
+integration branch (cut from `main`), and the run ends by asking whether to push it
+as a feature branch or merge it onto `main` — nothing is pushed and `main` is never
+touched until you choose. Per-slice branches/PRs happen **only** with `--per-slice-pr`
+or an explicit request.
 
 Run state is written under `docs/spec-loop/<run-id>/` (request, slice DAG, open
 escalations, and an audit log of auto-decisions).
@@ -107,9 +126,11 @@ What happens:
 - The Iron Council convenes at **intake** (verdict: ENDORSE) and again on the **plan**
   (ENDORSE) — the work is sound, so it stays silent.
 - The slice runs end-to-end in its own worktree: plan → execute (TDD) → light
-  `review-pr code` → quality gate → merge.
-- **No interruptions.** You get a final summary with the branch/PR. This is the happy
-  path: when the request and plan are clean, the council never bothers you.
+  `review-pr code` → quality gate → verified branch; the controller merges it into the
+  single integration branch.
+- **One up-front-free run, one closing prompt.** The council never bothers you when
+  the request and plan are clean; at the end you're asked once whether to push the
+  integration branch as a feature branch or merge it onto `main`.
 
 ### Mid — a multi-slice feature in parallel (a council concern folded in)
 
@@ -168,9 +189,11 @@ What happens:
   on the integration base and a cross-slice review of the cumulative diff. It catches
   that the dashboard calls an invoice field the split renamed; the loop opens a small
   **remediation slice**, fixes it, and re-verifies — still no human contact.
-- You get a summary noting the split parent, its children, and the integration result.
-  Illustrates **longer autonomous runs on larger work**: coarse-in, self-refining,
-  whole verified — with the escalation bar unchanged.
+- With everything merged onto the one integration branch and verified, you're asked
+  once how to publish it (feature branch or onto `main`), then get a summary noting the
+  split parent, its children, and the integration result. Illustrates **longer
+  autonomous runs on larger work**: coarse-in, self-refining, whole verified — with the
+  escalation bar unchanged.
 
 ## The Iron Council
 
@@ -252,7 +275,7 @@ re-prompted — update it anytime with:
 | command | `dashboard`       | Read-only terminal-markdown view of a run — DAG, derived waves, slice status, escalations, decisions (`/spec-loop:dashboard [run-id]`) |
 | command | `dashboard-serve` | Start a local read-only **web** dashboard — a dark-theme single-page UI (overview + drill-down, auto-refresh) over the same run artifacts (`/spec-loop:dashboard-serve [--port N] [--root PATH]`) |
 | command | `peer-review`     | Strictly read-only multi-provider peer-review loop — resolve a real PR (GitHub/Azure DevOps/Bitbucket URL or local `--base/--head`), convene the five `peer-review-*` reviewers + a report-only `pr-review-toolkit` pass via `peer-review-council`, and publish one report under `docs/pr-review/<review-id>/`; never edits, merges, or posts (`/spec-loop:peer-review <requirements> --pr <url>`) |
-| agent   | `spec-loop-slice` | Per-slice worker — creates a clean dedicated worktree up front, then plan→council→(split if too big)→execute→review→quality-gate→merge inside it |
+| agent   | `spec-loop-slice` | Per-slice worker — creates a clean dedicated worktree up front, then plan→council→(split if too big)→execute→review→quality-gate→verify, and hands the committed branch back to the controller to integrate (opens its own PR only in `--per-slice-pr` mode) |
 | agent   | `peer-review-conformance` | Peer-review reviewer — judges the diff against the supplied business requirements |
 | agent   | `peer-review-correctness` | Peer-review reviewer — hunts logic errors and bugs in the diff |
 | agent   | `peer-review-design`      | Peer-review reviewer — judges design, abstraction, and structure |
@@ -274,10 +297,13 @@ re-prompted — update it anytime with:
 - **Clean dedicated worktrees:** each worker's first action is to create a clean,
   dedicated worktree under `.worktrees/spec-loop/<run-id>/<slice-id>` (branch
   `spec-loop/<run-id>/<slice-id>`), branched from the current tip of the
-  integration base, with a verified clean baseline. Stale worktrees from aborted
-  runs are removed and recreated; a worktree is reused only when resuming a paused
-  slice that has committed progress. `.worktrees/` must be gitignored (the
-  using-git-worktrees skill handles this).
+  integration base, with a verified clean baseline. These per-slice branches are an
+  **ephemeral isolation detail, not deliverables**: the controller merges each into
+  the singular integration branch and deletes it (per-slice branches/PRs survive only
+  in `--per-slice-pr` mode). Stale worktrees from aborted runs are removed and
+  recreated; a worktree is reused only when resuming a paused slice that has committed
+  progress. `.worktrees/` must be gitignored (the using-git-worktrees skill handles
+  this).
 - **Agent nesting / background rule:** only the top-level session can run agents
   in the background. The controller backgrounds the slice workers; each slice
   worker is a subagent and therefore dispatches its own implementer/reviewer
@@ -296,9 +322,10 @@ re-prompted — update it anytime with:
   (`MAX_SPLIT_DEPTH = 2`). A slice still oversized at the cap stops splitting and
   falls back to the normal escalation path — splits never become a new way to
   interrupt you.
-- **Integration gate runs on the merge base.** If slices opened PRs instead of
-  merging, it verifies on a throwaway integration branch and reports, leaving the PRs
-  for you to merge.
+- **Integration gate runs on the integration branch,** then prompts you to publish it
+  (push as a feature branch or merge onto `main`). In `--per-slice-pr` mode there is
+  no single merged branch, so it verifies on a throwaway integration branch and
+  reports, leaving the PRs for you to merge.
 
 ## License
 

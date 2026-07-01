@@ -1,6 +1,6 @@
 ---
 description: "Spec-driven autonomous loop: decompose a request into small slices, then plan→execute→review→fix each in parallel worktrees, surfacing only genuine decisions"
-argument-hint: "<feature request> [--max-parallel N] [--risk-floor 1|2|3] [--resume <run-id>]"
+argument-hint: "<feature request> [--branch <name>] [--base-branch <name>] [--max-parallel N] [--risk-floor 1|2|3] [--per-slice-pr] [--resume <run-id>]"
 allowed-tools: ["Bash", "Glob", "Grep", "Read", "Task", "AskUserQuestion"]
 ---
 
@@ -41,7 +41,20 @@ because you are the only layer that can interactively ask the human anything.
   `subagent-driven-development`. It does NOT override
   `superpowers:verification-before-completion`.
 - Slice workers run in the **background** so the terminal is never blocked.
-- Never let any slice work on `main` — every slice gets its own worktree.
+- **Single-branch integration (default).** Every slice merges into ONE dedicated
+  local **integration branch** — never `main`/`master` directly, and never as its
+  own surviving branch or PR. A slice's worktree branch
+  (`spec-loop/<run-id>/<slice-id>`) is an ephemeral *isolation* detail, not a
+  deliverable: the **controller** — not the slice — merges it into the integration
+  branch (serially, at the wave boundary) and then deletes it. The loop **never
+  pushes** during the run and **never opens a PR or leaves a branch per slice**. The
+  sole exception is `--per-slice-pr` mode (Phase 0), set by the flag or an explicit
+  request in the prose, in which each slice opens its own PR instead.
+- Never let any slice work on `main` — every slice gets its own worktree, branched
+  off the integration branch.
+- **The run ends by prompting you how to publish** the integration branch — push it
+  as a feature branch (optionally opening a PR) or merge it onto `main` (Phase 5).
+  The loop does not push or touch `main` until you choose.
 
 ## Preflight — required plugins
 
@@ -62,7 +75,14 @@ proceed without them.
 ## Phase 0 — Intake & decompose
 
 1. If `--resume <run-id>` is present, skip to **Resume** below.
-2. Parse flags: `--max-parallel` (default 5), `--risk-floor` (default 1).
+2. Parse flags: `--max-parallel` (default 5), `--risk-floor` (default 1),
+   `--branch <name>` (integration branch name; default = a meaningful slug derived
+   from the request), `--base-branch <name>` (branch the integration branch is cut
+   from; default `main`, else `master`), and `--per-slice-pr` (opt into per-slice
+   PRs). Enter **`per-slice-pr` mode** only when that flag is present **or** the
+   request prose explicitly asks for a branch/PR per slice; otherwise the run is
+   **single-branch** — all slices merge into one integration branch. Never infer
+   per-slice branches from anything less than an explicit request.
 3. **Quality-gate config (one-time).** Check whether
    `~/.claude/spec-loop/quality-gate.json` exists. If it does **not**, run the
    first-run setup once now — follow the `/spec-loop:quality-gate` command's routine
@@ -107,13 +127,30 @@ proceed without them.
 ## Phase 1 — Build the DAG and run state
 
 1. Generate a `run-id` (e.g. `git log -1 --format=%cd --date=format:%Y%m%d`-`<short-slug>`; if that yields a duplicate, append `-2`, `-3`).
-2. Record the integration base: `base_ref` = `git branch --show-current` and
-   `base_sha` = `git rev-parse HEAD`. This is the branch each worker's clean
-   worktree is created from. (Ensure `.worktrees/` is gitignored — the
-   using-git-worktrees skill verifies and adds it, but check.)
+2. **Establish the singular integration branch.** All slices merge into this ONE
+   local branch. It must not be `main`/`master`, must not contain `spec-loop` in its
+   name, and should be meaningful to the work.
+   - **Name:** `--branch <name>` if given, else a short, human-meaningful slug of the
+     request (e.g. "Add CSV export to the reports page" → `csv-export`). No date, no
+     `spec-loop` prefix. If a local branch by that name already exists, append `-2`,
+     `-3`, ….
+   - **Base:** `--base-branch <name>` if given, else `main` (else `master`). If the
+     base has an upstream, refresh it first (`git fetch` then fast-forward), then cut
+     the integration branch from its tip and **check it out** so the controller sits
+     on it for the whole run: `git checkout -b <integration-branch> <base-branch>`.
+   - **Clean tree required.** If the working tree has uncommitted changes, do NOT
+     switch branches — run `escalation-gate` (material assumption / cannot proceed
+     safely) and ask the human to commit or stash first.
+   - Record `base_ref` = `<integration-branch>` and `base_sha` = `git rev-parse HEAD`
+     (its creation point). This is the branch each worker's clean worktree is cut
+     from, and the branch the controller merges every slice into. (Ensure
+     `.worktrees/` is gitignored — the using-git-worktrees skill verifies and adds
+     it, but check.)
+   - Record the run's **merge mode** (`single-branch` default, or `per-slice-pr`) to
+     pass to every slice.
 3. Create `docs/spec-loop/<run-id>/` and write:
    - `request.md` — the original request, verbatim.
-   - `dag.json` — `{ base_ref, base_sha, slices: [...] }` where each slice is `{id, goal, files, subsystems, deps:[ids], risk_tier:1|2|3, depth:0, parent:null, status:"pending"}`. Apply `--risk-floor` as the minimum tier. Assign tiers using `review-depth-map` heuristics. `depth` tracks split generation (intake slices = `0`); `parent` links a split child to the slice it came from. `status` may also become the terminal value `"split"` (Phase 3) when a slice is replaced by its children.
+   - `dag.json` — `{ base_ref, base_sha, base_branch, merge_mode, slices: [...] }` where `base_ref` is the integration branch, `base_branch` is what it was cut from, `merge_mode` is `"single-branch"` or `"per-slice-pr"`, and each slice is `{id, goal, files, subsystems, deps:[ids], risk_tier:1|2|3, depth:0, parent:null, status:"pending"}`. Apply `--risk-floor` as the minimum tier. Assign tiers using `review-depth-map` heuristics. `depth` tracks split generation (intake slices = `0`); `parent` links a split child to the slice it came from. `status` may also become the terminal value `"split"` (Phase 3) when a slice is replaced by its children.
    - `escalations.md` — start empty (header only).
    - `decisions-log.md` — start empty (header only).
 4. Sanity-check the DAG: no cycles, every `deps` id exists. If a cycle exists, that is a decomposition error — fix it yourself (collapse the cyclic slices into one) and log it.
@@ -133,11 +170,13 @@ background dispatch to work below depth 1.
    **Dispatch them in a single message, each `run_in_background: true`**, so they
    run concurrently without blocking the terminal (per the user's saved
    preference). Pass each agent: its slice object, the `run-id`, the absolute
-   path to `docs/spec-loop/<run-id>/`, its risk tier, `base_ref`, and the absolute
-   path to the quality-gate config (`~/.claude/spec-loop/quality-gate.json`). The worker's
-   first action is to create a clean dedicated worktree from the current tip of
-   `base_ref` under `.worktrees/spec-loop/<run-id>/<slice-id>` — before any other
-   work.
+   path to `docs/spec-loop/<run-id>/`, its risk tier, `base_ref` (the integration
+   branch), the run's `merge_mode` (`single-branch` | `per-slice-pr`), and the
+   absolute path to the quality-gate config (`~/.claude/spec-loop/quality-gate.json`).
+   The worker's first action is to create a clean dedicated worktree from the current
+   tip of `base_ref` under `.worktrees/spec-loop/<run-id>/<slice-id>` — before any
+   other work. In `single-branch` mode the worker does **not** merge or push; it
+   finishes as a verified, committed branch and the controller integrates it (Phase 3).
    - **Fallback:** if a background dispatch is rejected because you are yourself a
      subagent (e.g. `/spec-loop` was invoked from within another agent), re-dispatch
      the wave's slices **synchronously** (`run_in_background: false`) instead. The
@@ -174,14 +213,26 @@ background dispatch to work below depth 1.
    - Re-run the Phase 1 sanity check (no cycles, every `deps` id exists), then append
      one line to `decisions-log.md` recording the graft. The children schedule in
      later waves like any `pending` slice — no special wave logic.
-4. **Per-wave integration check (lightweight).** After this wave's `DONE` slices have
-   merged into `base_ref` (their Step 5 `finishing-a-development-branch`), run the
-   project's full test/build **fresh on `base_ref`** and read the output
-   (`superpowers:verification-before-completion` discipline). This catches same-wave
-   merge incompatibilities and cross-slice drift *early*, while remediation is cheap —
-   two slices in one wave both branched from the same tip and merged blind to each
-   other. Green → continue. Red → open a **remediation slice** (Phase 5's procedure)
-   for the failure and schedule it; do not advance as if the wave were clean.
+4. **Integrate the wave onto the singular branch, then check it.**
+   - **(a) Controller-owned serial merge (single-branch mode).** The controller — not
+     the slices — merges, so every slice lands on ONE branch race-free. Sitting on
+     `base_ref` in the main worktree, take each verified `DONE` slice **one at a time,
+     never concurrently** and merge its branch:
+     `git merge --no-ff spec-loop/<run-id>/<slice-id>`. After a clean merge, remove
+     the slice's worktree and delete its branch (`superpowers:using-git-worktrees`
+     cleanup, i.e. `git worktree remove` then `git branch -d`). A merge **conflict**
+     is an integration failure → do not force it; open a **remediation slice**
+     (Phase 5's procedure) scoped to reconciling the two slices, and leave the
+     unmerged slice branch in place for it. *(In `per-slice-pr` mode the slices have
+     already opened their own PRs — there is nothing for the controller to merge;
+     skip (a) and defer verification to Phase 5.4's throwaway integration branch.)*
+   - **(b) Per-wave integration check (lightweight).** With the wave merged, run the
+     project's full test/build **fresh on `base_ref`** and read the output
+     (`superpowers:verification-before-completion` discipline). This catches same-wave
+     merge incompatibilities and cross-slice drift *early*, while remediation is cheap
+     — two slices in one wave both branched from the same tip and merged blind to each
+     other. Green → continue. Red → open a **remediation slice** (Phase 5's procedure)
+     for the failure and schedule it; do not advance as if the wave were clean.
 5. Collect ALL `OPEN` entries from `escalations.md` and surface them as ONE
    batched `AskUserQuestion` round (one question per escalation, with the
    recommended default first). Do not ask one-at-a-time across waves.
@@ -198,9 +249,10 @@ answered. Once every slice is terminal, proceed to Phase 5.
 
 ## Phase 5 — Integration gate (verify the assembled whole)
 
-Each slice merged after passing *its own* tests in *its own* worktree — but nothing
-has yet verified the slices **together**. This phase does, before the run is called
-complete. (Analogous to a cross-phase integration check.)
+Each slice was merged onto the integration branch (by the controller, at its wave
+boundary) after passing *its own* tests in *its own* worktree — but nothing has yet
+verified the slices **together**. This phase does, before the run is called complete.
+(Analogous to a cross-phase integration check.)
 
 1. **Full test/build on `base_ref`.** Run the project's complete test and build
    suite fresh on `base_ref` (which now contains every merged slice) and read the
@@ -216,35 +268,59 @@ complete. (Analogous to a cross-phase integration check.)
      (`depth:0`, `parent:null`, risk tier = run max, `deps` = all completed slices)
      whose goal is to fix the specific integration failure — and dispatch it through
      a fresh `spec-loop-slice` like any other slice. It runs the same plan → execute →
-     review → quality-gate → verify → merge loop with the same bounded auto-fix.
+     review → quality-gate → verify loop with the same bounded auto-fix, and the
+     controller integrates its branch onto `base_ref` (Phase 3.4) when it returns.
    - Re-run Phase 5 after the remediation slice merges.
    - Only if a remediation slice itself exhausts its bounded loop and returns
      `NEEDS_DECISION` does this reach the human — through the **existing**
      `escalation-gate` (`review-block`) at the next wave boundary. No new trigger;
      the bar is exactly the per-slice bar applied to the whole.
-4. **PR-mode variant.** If slices opened PRs instead of merging to `base_ref`
-   (their `finishing-a-development-branch` chose PR), there is no merged base to test.
-   Build a **throwaway integration branch** off `base_sha`, merge every completed
-   slice branch into it, run steps 1–2 there, report the integration status, then
-   delete the branch — leaving the PRs untouched for the human to merge. (Merge-to-
-   `base_ref` is the primary path; this is the fallback.)
+4. **`per-slice-pr` variant.** In `--per-slice-pr` mode each slice opened its own PR,
+   so there is no single merged branch to test. Build a **throwaway integration
+   branch** off `base_sha`, merge every completed slice branch into it, run steps 1–2
+   there, report the integration status, then delete the branch — leaving the PRs
+   untouched for the human to merge. (Single-branch merge is the primary path; this
+   is only for the explicitly-requested per-slice-PR mode.)
 
-When Phase 5 is green, produce the **final summary**:
-- Slices completed, with branch/PR for each (note any `split` parents and their children).
+5. **Publish prompt (single-branch mode) — the run's final interaction.** When steps
+   1–3 are green, all the work sits on the singular local integration branch,
+   unpushed, with `main`/`master` untouched. Ask the human via **one
+   `AskUserQuestion`** how to publish it (recommended option first):
+   1. **Push as a feature branch** — push the integration branch to the remote,
+      optionally opening a PR.
+   2. **Merge onto `main`** — locally `git checkout main && git merge --no-ff
+      <integration-branch>`; offer to push `main` afterward.
+   3. **Leave it local** — do nothing; the branch stays for the human to handle.
+   Perform the chosen action and nothing more — never push or touch `main` without an
+   explicit choice. *(In `per-slice-pr` mode the PRs are already open: skip this
+   prompt and just report the PR list.)*
+
+When Phase 5 is green and the publish choice is handled, produce the **final summary**:
+- Slices completed, each with its merge commit on the integration branch (or its PR
+  in `per-slice-pr` mode; note any `split` parents and their children).
+- The integration branch name and how it was published (pushed as a feature branch /
+  merged onto `main` / left local).
 - The `decisions-log.md` (auto-decisions made on the human's behalf, including splits).
 - Integration gate result (suite + cross-slice review; any remediation slices added).
 - Any slices that remain blocked and why.
 
 ## Resume
 
-For `--resume <run-id>`: read `docs/spec-loop/<run-id>/dag.json`, skip all terminal
-slices (`complete` and `split` parents), drain any `ANSWERED` escalations into
-re-dispatches, and continue from the first wave that has runnable slices. If every
-slice is already terminal, go straight to the Phase 5 integration gate before
-declaring the run done.
+For `--resume <run-id>`: read `docs/spec-loop/<run-id>/dag.json`, recover `base_ref`
+(the integration branch) and `merge_mode`, and **check out `base_ref`** so the
+controller resumes on the singular branch (clean-tree guard as in Phase 1). Skip all
+terminal slices (`complete` and `split` parents), drain any `ANSWERED` escalations
+into re-dispatches, and continue from the first wave that has runnable slices. If
+every slice is already terminal, go straight to the Phase 5 integration gate — which
+ends with the publish prompt — before declaring the run done.
 
 ## Guardrails
 - Never dispatch two implementer-level agents that touch the same files
   concurrently — that is what the dependency DAG and per-slice worktrees prevent.
 - Never surface an escalation that `escalation-gate` would resolve as proceed-and-log.
 - Never claim the run is complete without verifying each slice's evidence.
+- Never let a slice self-merge or push, and never create a branch or PR per slice,
+  unless `--per-slice-pr` (flag or explicit request) is set — the controller owns the
+  single-branch integration and merges slice branches serially.
+- Never push the integration branch or merge onto `main` without the human's explicit
+  publish choice (Phase 5.5).

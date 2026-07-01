@@ -47,6 +47,24 @@ prior build. Pinned entries map to git tags `v<version>`.
   read-only (including this one and the two dashboard commands) does not grant `Edit` in its
   `allowed-tools`.
 
+### Changed
+- **Single-branch integration is now the default and is hardened.** Every slice merges into
+  ONE dedicated local integration branch (cut from `main` by default, named meaningfully after
+  the work — never containing `spec-loop`), instead of each slice being free to open its own PR
+  or leave its own branch. Slices no longer self-merge: they finish as verified, committed
+  branches and the **controller** merges each into the integration branch **serially** at the
+  wave boundary (eliminating the race where two same-wave slices checked out and merged into the
+  shared branch concurrently), then deletes the per-slice worktree branch. Per-slice worktree
+  branches are now explicitly an ephemeral isolation detail, not a deliverable.
+- **The run ends by prompting how to publish** the integration branch — push it as a feature
+  branch (optionally opening a PR) or merge it onto `main` — and never pushes or touches `main`
+  without that explicit choice.
+- Added flags `--branch <name>` (integration branch name), `--base-branch <name>` (branch it is
+  cut from; default `main`/`master`), and `--per-slice-pr` (opt into a branch/PR per slice — the
+  only way, alongside an explicit request in the prose, to get the old per-slice behavior).
+- `dag.json` now records `base_branch` and `merge_mode`, and `--resume` restores and checks out
+  the integration branch.
+
 ## [1.0.0] - 2026-06-25
 ### Added
 - Stable / beta / alpha release channels and a pinned version archive, all served
