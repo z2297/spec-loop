@@ -227,6 +227,29 @@
     }
 
     // ---- overview render --------------------------------------------------
+    // Partition runs into ordered groups by source root. The API omits `root`
+    // entirely for single-root (byte-for-byte back-compat) — that case yields
+    // one empty-keyed group so the overview renders exactly as before. Any run
+    // carrying a non-empty `root` flips multiRoot on and preserves first-
+    // appearance root order (the server emits roots in input-argument order).
+    function groupRunsByRoot(runs) {
+      const groups = [];
+      const byKey = Object.create(null);
+      (runs || []).forEach((r) => {
+        const key = (r && typeof r.root === "string") ? r.root : "";
+        let g = byKey[key];
+        if (!g) { g = { root: key, runs: [] }; byKey[key] = g; groups.push(g); }
+        g.runs.push(r);
+      });
+      const multiRoot = groups.some((g) => g.root !== "");
+      return { multiRoot, groups: groups.length ? groups : [{ root: "", runs: [] }] };
+    }
+    function rootGroupSection(group) {
+      const sec = el("div", { cls: "section" });
+      sec.appendChild(el("h3", { text: group.root }));   // textContent only — root is untrusted
+      group.runs.forEach((r) => sec.appendChild(overviewCard(r)));
+      return sec;
+    }
     function renderOverview(runs) {
       $view.className = "";
       $view.textContent = "";
@@ -235,7 +258,13 @@
         $view.textContent = "no spec-loop runs found";
         return;
       }
-      runs.forEach((r) => $view.appendChild(overviewCard(r)));
+      const { multiRoot, groups } = groupRunsByRoot(runs);
+      if (!multiRoot) {
+        // single root: identical to prior behavior — flat list of cards
+        groups[0].runs.forEach((r) => $view.appendChild(overviewCard(r)));
+        return;
+      }
+      groups.forEach((g) => $view.appendChild(rootGroupSection(g)));
     }
     function overviewCard(run) {
       if (run.status === "unreadable") return transientCard(run.run_id);
