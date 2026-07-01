@@ -152,15 +152,33 @@
         ? LABEL_CLASS[label] : "lbl-unknown";
     }
 
+    // ---- environment probe -------------------------------------------------
+    // True in a real browser, false when this script is loaded under Node for
+    // testing (no document/window). Every top-level side effect that touches a
+    // browser global is gated on this so the committed test harness can import
+    // the pure/DOM-producing functions without the page bootstrapping itself.
+    const HAS_DOM = typeof document !== "undefined" && typeof window !== "undefined";
+
+    // Swappable document provider: the real `document` in a browser, or a tiny
+    // pure-JS DOM shim injected by the test harness via __setDocument(). el()
+    // builds nodes through _doc so render output is testable under Node. In a
+    // browser _doc === document, so el() behavior is byte-identical.
+    let _doc = HAS_DOM ? document : null;
+    function __setDocument(doc) { _doc = doc; }
+
     // ---- DOM refs ---------------------------------------------------------
-    const $view = document.getElementById("view");
-    const $crumbs = document.getElementById("crumbs");
-    const $freshness = document.getElementById("freshness");
-    const $freshText = document.getElementById("fresh-text");
+    // Populated only in a browser; stay null under Node (the tested builder
+    // functions never read these — only the out-of-scope $view-mutating
+    // orchestrators do, and those never run under the harness).
+    const $view = HAS_DOM ? document.getElementById("view") : null;
+    const $crumbs = HAS_DOM ? document.getElementById("crumbs") : null;
+    const $freshness = HAS_DOM ? document.getElementById("freshness") : null;
+    const $freshText = HAS_DOM ? document.getElementById("fresh-text") : null;
 
     // ---- app state --------------------------------------------------------
     // view: {kind:"overview"} | {kind:"detail", runId}
-    let view = parseHash();
+    // Node-safe default: parseHash() reads location.hash, absent under Node.
+    let view = HAS_DOM ? parseHash() : { kind: "overview" };
     let timer = null;          // the single re-armed poll timer
     let goneTimer = null;      // deferred "run gone → overview" nav, cancellable
     let viewGen = 0;           // bumped on every view entry; stale in-flight polls are dropped
@@ -171,7 +189,7 @@
 
     // ---- tiny DOM helpers (textContent only — never innerHTML on data) -----
     function el(tag, opts) {
-      const node = document.createElement(tag);
+      const node = _doc.createElement(tag);
       if (opts) {
         if (opts.cls) node.className = opts.cls;
         if (opts.text != null) node.textContent = String(opts.text);
@@ -184,14 +202,18 @@
     function sha7(s) { return (s == null ? "?" : String(s)).slice(0, 7); }
 
     // ---- routing ----------------------------------------------------------
-    function parseHash() {
-      const h = (location.hash || "").replace(/^#/, "");
+    // Pure core: hash string -> view object. Extracted so it is testable without
+    // a browser `location`. A namespaced run-id (`<root>:<runId>`) survives the
+    // encodeURIComponent/decodeURIComponent round-trip intact (colon preserved).
+    function parseHashFrom(hash) {
+      const h = (hash || "").replace(/^#/, "");
       if (h.startsWith("run/")) {
         const id = decodeURIComponent(h.slice("run/".length));
         if (id) return { kind: "detail", runId: id };
       }
       return { kind: "overview" };
     }
+    function parseHash() { return parseHashFrom(location.hash); }
     function activeUrl() {
       return view.kind === "detail"
         ? "/api/runs/" + encodeURIComponent(view.runId)
@@ -223,7 +245,7 @@
       $crumbs.hidden = false;
       const home = el("a", { text: "← all runs" });
       home.addEventListener("click", () => navigate({ kind: "overview" }));
-      $crumbs.append(home, document.createTextNode("  /  " + view.runId));
+      $crumbs.append(home, _doc.createTextNode("  /  " + view.runId));
     }
 
     // ---- overview render --------------------------------------------------
@@ -503,18 +525,37 @@
       poll();                             // immediate fetch, then re-arms itself
     }
 
-    window.addEventListener("hashchange", () => {
-      const next = parseHash();
-      if (next.kind !== view.kind || next.runId !== view.runId) {
-        view = next;
-        enterView();
-      }
-    });
+    // ---- bootstrap (browser only) -----------------------------------------
+    // All startup side effects are gated on HAS_DOM so importing this script
+    // under Node (the committed test harness) never registers listeners, arms
+    // timers, or fires a fetch — it only exposes the functions above for test.
+    if (HAS_DOM) {
+      window.addEventListener("hashchange", () => {
+        const next = parseHash();
+        if (next.kind !== view.kind || next.runId !== view.runId) {
+          view = next;
+          enterView();
+        }
+      });
 
-    // tick the relative freshness stamp once a second (display only — no fetch)
-    setInterval(renderFreshness, 1000);
+      // tick the relative freshness stamp once a second (display only — no fetch)
+      setInterval(renderFreshness, 1000);
 
-    enterView();
+      enterView();
+    }
+
+    // ---- test export (inert in a browser) ---------------------------------
+    // `module` is undefined in a classic <script>, so this block is a no-op when
+    // the page is opened directly. The committed Node harness (index.test.mjs)
+    // extracts the script body, strips this tail, and appends an equivalent ESM
+    // `export {...}` before importing it as a real module (so V8 attributes
+    // coverage). The two lists MUST stay in sync — index.test.mjs asserts it.
+    /* test-export */ if (typeof module !== "undefined" && module.exports) {
+      module.exports = {
+        labelClass, sha7, truncate, groupRunsByRoot, parseHashFrom,
+        el, overviewCard, rootGroupSection, sliceRow, __setDocument,
+      };
+    }
   </script>
 </body>
 </html>
