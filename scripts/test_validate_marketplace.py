@@ -199,10 +199,10 @@ def write_plugin_dir(root: Path, source: str, plugin_json) -> Path:
 
 def single_entry_marketplace(entry, *, metadata=None) -> dict:
     """A minimal valid marketplace shell carrying exactly one plugins[] entry."""
-    m = {"name": "demo-market", "owner": {"name": "tester"}, "plugins": [entry]}
+    marketplace = {"name": "demo-market", "owner": {"name": "tester"}, "plugins": [entry]}
     if metadata is not None:
-        m["metadata"] = metadata
-    return m
+        marketplace["metadata"] = metadata
+    return marketplace
 
 
 # --------------------------------------------------------------------------
