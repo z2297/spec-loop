@@ -1,0 +1,19 @@
+# coverage_omit.txt — lines excluded from measure_coverage.py's ratios.
+#
+# Format (one exclusion per line):   scripts/<file>.py:START[-END]  # rationale
+# Blank lines and full-line '#' comments are ignored. Every data entry MUST
+# carry a '# rationale'; measure_coverage.py refuses to run on a malformed or
+# rationale-less entry so this manifest stays auditable and cannot silently
+# grow into a place to hide genuinely-untested code.
+#
+# Only two legitimate categories are excluded:
+#   1. `if __name__ == "__main__":` process-entry shims — never imported/run under unittest.
+#   2. The blocking serve_forever() daemon tail — cannot terminate under a unit test.
+
+scripts/dashboard_launcher.py:551-552    # __main__ entry shim; not executed under unittest import
+scripts/dashboard_server.py:663-664      # __main__ entry shim; not executed under unittest import
+scripts/pr_resolver.py:488-489           # __main__ entry shim; not executed under unittest import
+scripts/release.py:194-195               # __main__ entry shim; not executed under unittest import
+scripts/validate_marketplace.py:312-313  # __main__ entry shim; not executed under unittest import
+
+scripts/dashboard_server.py:654-659      # blocking serve_forever()/KeyboardInterrupt/finally daemon tail; cannot run to completion under a unit test
