@@ -686,5 +686,162 @@ class TestMainLaunch(unittest.TestCase):
         self.assertTrue([c for c in self.calls if c[:2] == ["docker", "run"]])
 
 
+# --------------------------------------------------------------------------
+# s5 — Layer-B side-effect shell branch coverage (recording-fake / _proc only;
+# NEVER real docker, NEVER an unmocked _run). Appended; existing security-
+# invariant assertions above are untouched.
+# --------------------------------------------------------------------------
+
+class TestPortBoundBindForDisjunct(unittest.TestCase):
+    """Close dashboard_launcher.py:358 — the '_port_bound' 'bind for' disjunct.
+
+    The 'port is already allocated' / 'address already in use' disjuncts and
+    '_name_conflict' are already covered end-to-end via the existing main-level
+    tests, so only the 'bind for' disjunct is asserted here. Pure predicate."""
+
+    def test_bind_for_stderr_is_port_bound(self):
+        self.assertTrue(dl._port_bound(
+            "docker: Error response from daemon: Bind for 127.0.0.1:8787 "
+            "failed: something"))
+
+
+class TestHandleRunFailureGenericBranch(unittest.TestCase):
+    """Close dashboard_launcher.py:400-401 — the generic 'docker run failed'
+    branch of _handle_run_failure, reached when the stderr matches NEITHER
+    _name_conflict (checked first) NOR _port_bound."""
+
+    def test_unclassified_failure_surfaces_stderr_and_returns_one(self):
+        # stderr that hits neither predicate -> generic branch.
+        proc = _proc(returncode=1, stderr="some other error")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = dl._handle_run_failure(proc, dl.DEFAULT_PORT)
+        self.assertEqual(rc, 1)
+        self.assertIn("docker run failed", err.getvalue().lower())
+        self.assertIn("some other error", err.getvalue())
+
+
+class TestExecutePlanBranches(unittest.TestCase):
+    """Close dashboard_launcher.py:418 (empty-argvs guard) and 422-424 (a real
+    non-final-step failure aborts before the docker run)."""
+
+    def test_empty_argvs_routes_to_fallback_and_never_runs_docker(self):
+        # 418: empty argvs -> _fallback(...). Neutralize os.execvp by patching
+        # _fallback itself (the file's module-attr patch convention).
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            return _proc(returncode=0)
+
+        with mock.patch("dashboard_launcher.subprocess.run", side_effect=run):
+            with mock.patch.object(dl, "_fallback", return_value=42) as fb:
+                code, ran_ok = dl._execute_plan(dl.CREATE, [], dl.DEFAULT_PORT)
+        self.assertEqual(code, 42)
+        self.assertFalse(ran_ok)
+        fb.assert_called_once()
+        # Never-invokes-docker invariant, test-enforced.
+        self.assertFalse([c for c in calls if c[:2] == ["docker", "run"]])
+
+    def test_real_nonfinal_step_failure_aborts_before_docker_run(self):
+        # 422-424: first (stop) step fails with a NON-benign error (not 'No such
+        # container') -> abort (1, False); the trailing docker run never happens.
+        argvs = [["docker", "stop", dl.SINGLETON_NAME],
+                 ["docker", "run", "-d", dl.IMAGE_TAG]]
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            if argv[:2] == ["docker", "stop"]:
+                return _proc(returncode=1, stderr="permission denied")
+            return _proc(returncode=0, stdout="containerid")
+
+        err = io.StringIO()
+        with mock.patch("dashboard_launcher.subprocess.run", side_effect=run):
+            with contextlib.redirect_stderr(err):
+                code, ran_ok = dl._execute_plan(
+                    dl.RECREATE, argvs, dl.DEFAULT_PORT)
+        self.assertEqual((code, ran_ok), (1, False))
+        self.assertIn("failed", err.getvalue().lower())
+        # The docker run was NEVER reached.
+        self.assertFalse([c for c in calls if c[:2] == ["docker", "run"]])
+
+
+class TestReadMountSet(unittest.TestCase):
+    """Close dashboard_launcher.py:446-451 — read_mount_set absent (None, silent),
+    corrupt (None + 'unreadable' warning), and non-list (None); plus round-trip.
+
+    Reuses the TestRegistry tempfile lifecycle so nothing touches the real
+    ~/.spec-loop/dashboard state dir."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state = os.path.join(self._tmp.name, "state")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_absent_mount_set_is_none_and_silent(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertIsNone(dl.read_mount_set(self.state))
+        self.assertEqual(err.getvalue(), "")
+
+    def test_corrupt_mount_set_is_none_and_warns(self):
+        os.makedirs(self.state)
+        with open(os.path.join(self.state, dl.MOUNTSET_NAME), "w") as fh:
+            fh.write("{ not json ]")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            result = dl.read_mount_set(self.state)
+        self.assertIsNone(result)
+        self.assertIn("unreadable", err.getvalue().lower())
+
+    def test_non_list_payload_is_none(self):
+        os.makedirs(self.state)
+        with open(os.path.join(self.state, dl.MOUNTSET_NAME), "w") as fh:
+            json.dump({"not": "a list"}, fh)
+        self.assertIsNone(dl.read_mount_set(self.state))
+
+    def test_write_then_read_round_trip(self):
+        dl.write_mount_set(self.state, ["/roots/a", "/roots/b"])
+        self.assertEqual(dl.read_mount_set(self.state), ["/roots/a", "/roots/b"])
+
+
+class TestRunPlanBranches(unittest.TestCase):
+    """Close dashboard_launcher.py:502-503 (REUSE) and 507 (belt-and-suspenders
+    FALLBACK / empty plan)."""
+
+    def test_reuse_prints_and_returns_zero_without_touching_docker(self):
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            return _proc(returncode=0)
+
+        out = io.StringIO()
+        with mock.patch("dashboard_launcher.subprocess.run", side_effect=run):
+            with contextlib.redirect_stdout(out):
+                rc = dl._run_plan((dl.REUSE, []), desired=["/roots/a"])
+        self.assertEqual(rc, 0)
+        self.assertIn("already running", out.getvalue().lower())
+        # REUSE runs no subprocess at all.
+        self.assertEqual(calls, [])
+
+    def test_fallback_decision_routes_to_fallback_and_never_runs_docker(self):
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            return _proc(returncode=0)
+
+        with mock.patch("dashboard_launcher.subprocess.run", side_effect=run):
+            with mock.patch.object(dl, "_fallback", return_value=7) as fb:
+                rc = dl._run_plan((dl.FALLBACK, []), desired=["/roots/a"])
+        self.assertEqual(rc, 7)
+        fb.assert_called_once()
+        self.assertFalse([c for c in calls if c[:2] == ["docker", "run"]])
+
+
 if __name__ == "__main__":
     unittest.main()
