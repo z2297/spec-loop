@@ -91,11 +91,37 @@ class TestRegistry(unittest.TestCase):
     def test_absent_registry_is_empty_never_crashes(self):
         self.assertEqual(dl.read_registry(self.state), {})
 
-    def test_corrupt_registry_is_empty_never_crashes(self):
+    def test_corrupt_registry_is_empty_and_warns(self):
+        # FIX 3: a corrupt registry resets to empty AND the reset is observable
+        # on stderr (so the loss of any other roots is not silent).
         os.makedirs(self.state)
         with open(os.path.join(self.state, dl.REGISTRY_NAME), "w") as fh:
             fh.write("{ this is not json ]")
-        self.assertEqual(dl.read_registry(self.state), {})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            result = dl.read_registry(self.state)
+        self.assertEqual(result, {})
+        self.assertIn("warning", err.getvalue().lower())
+        self.assertIn("unreadable", err.getvalue().lower())
+
+    def test_absent_registry_is_silent(self):
+        # An absent file is a normal first run, not corruption — no warning.
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(dl.read_registry(self.state), {})
+        self.assertEqual(err.getvalue(), "")
+
+    def test_non_numeric_value_is_dropped(self):
+        # FIX 3: an entry whose last_seen is not a number is dropped at read
+        # time so prune_stale's numeric comparison can never raise TypeError.
+        os.makedirs(self.state)
+        with open(os.path.join(self.state, dl.REGISTRY_NAME), "w") as fh:
+            json.dump({"/good": 1000.0, "/bad": "oops", "/flag": True}, fh)
+        reg = dl.read_registry(self.state)
+        self.assertEqual(reg, {"/good": 1000.0})
+        # And prune_stale over the sanitized map does not raise.
+        survivors = dl.prune_stale(reg, 1000.0, 100.0, path_exists=lambda p: True)
+        self.assertEqual(set(survivors), {"/good"})
 
     def test_non_dict_payload_degrades_to_empty(self):
         os.makedirs(self.state)
@@ -211,6 +237,14 @@ class TestMountComposition(unittest.TestCase):
         container_root = dl.mount_point_for(key)  # the --root value
         server_join = container_root + "/" + dl.DATA_REL
         self.assertEqual(dl.mount_target_for(key), server_join)
+
+    def test_target_matches_servers_actual_resolution(self):
+        # Strongest form: assert against the server's OWN resolution of the
+        # --root it is handed, i.e. realpath(join(mount_point, *DATA_SUBPATH)).
+        key = "myrepo"
+        server_resolves = os.path.realpath(
+            os.path.join(dl.mount_point_for(key), *ds.DATA_SUBPATH))
+        self.assertEqual(dl.mount_target_for(key), server_resolves)
 
 
 # --------------------------------------------------------------------------
@@ -444,6 +478,29 @@ class TestMainStop(unittest.TestCase):
                 rc = dl.main(["--stop"])
         self.assertEqual(rc, 1)
 
+    def test_stop_tolerates_no_such_container(self):
+        # Benign already-gone case: stop/rm return nonzero with 'No such
+        # container' -> still claim stopped, exit 0.
+        gone = _proc(returncode=1, stderr="Error: No such container: "
+                     "spec-loop-dashboard")
+        with mock.patch("dashboard_launcher.subprocess.run", return_value=gone):
+            with contextlib.redirect_stdout(io.StringIO()):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    rc = dl.main(["--stop"])
+        self.assertEqual(rc, 0)
+
+    def test_stop_surfaces_a_real_failure(self):
+        # A non-benign stop failure is surfaced on stderr and exits nonzero
+        # rather than falsely claiming success.
+        fail = _proc(returncode=1, stderr="permission denied while trying to "
+                     "connect to the Docker daemon socket")
+        err = io.StringIO()
+        with mock.patch("dashboard_launcher.subprocess.run", return_value=fail):
+            with contextlib.redirect_stderr(err):
+                rc = dl.main(["--stop"])
+        self.assertEqual(rc, 1)
+        self.assertIn("failed", err.getvalue().lower())
+
 
 class TestMainLaunch(unittest.TestCase):
     def setUp(self):
@@ -464,22 +521,53 @@ class TestMainLaunch(unittest.TestCase):
 
     def test_docker_absent_falls_back_to_python_server(self):
         # docker info raises FileNotFoundError -> python fallback foreground.
+        # The foreground server is handed off via os.execvp (live stdio), so we
+        # patch execvp to record its argv rather than replace the test process.
         def run(argv, **kwargs):
             self.calls.append(argv)
             if argv[0] == "docker":
                 raise FileNotFoundError("docker")
-            return _proc(returncode=0)  # the python3 server "runs"
+            return _proc(returncode=0)
         self.calls = []
+        execs = []
         with mock.patch("dashboard_launcher.subprocess.run", side_effect=run):
-            with contextlib.redirect_stderr(io.StringIO()):
-                rc = dl.main([])
-        self.assertEqual(rc, 0)
-        # The fallback server argv was invoked; no docker run happened.
-        fallback = [c for c in self.calls if c[0] == "python3"]
-        self.assertTrue(fallback)
-        self.assertEqual(fallback[0],
-                         ["python3", "scripts/dashboard_server.py",
-                          "--root", "."])
+            with mock.patch("dashboard_launcher.os.execvp",
+                            side_effect=lambda f, a: execs.append((f, a))):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    dl.main([])
+        # The fallback handed off to the server; no docker run happened, and the
+        # foreground server was NOT routed through the capture-mode _run helper.
+        self.assertEqual(len(execs), 1)
+        _file, argv = execs[0]
+        self.assertEqual(argv[0], "python3")
+        self.assertTrue(argv[1].endswith(
+            os.path.join("scripts", "dashboard_server.py")))
+        self.assertTrue(os.path.isabs(argv[1]), argv[1])
+        self.assertEqual(argv[2], "--root")
+        self.assertTrue(os.path.isabs(argv[3]), argv[3])
+        self.assertFalse([c for c in self.calls if c[0] == "python3"])
+        self.assertFalse([c for c in self.calls
+                          if c[:2] == ["docker", "run"]])
+
+    def test_docker_daemon_down_falls_back_without_indexerror(self):
+        # FIX 1: `docker info` returns rc=1 (installed but daemon down). This
+        # must reach the python fallback, not IndexError on an empty plan.
+        def run(argv, **kwargs):
+            self.calls.append(argv)
+            if tuple(argv[:2]) == ("docker", "info"):
+                return _proc(returncode=1, stderr="Cannot connect to the "
+                             "Docker daemon")
+            return _proc(returncode=0)
+        self.calls = []
+        execs = []
+        with mock.patch("dashboard_launcher.subprocess.run", side_effect=run):
+            with mock.patch("dashboard_launcher.os.execvp",
+                            side_effect=lambda f, a: execs.append((f, a))):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    dl.main([])
+        # Fell back to the foreground server; never attempted a docker run.
+        self.assertEqual(len(execs), 1)
+        self.assertEqual(execs[0][1][0], "python3")
         self.assertFalse([c for c in self.calls
                           if c[:2] == ["docker", "run"]])
 
@@ -539,6 +627,33 @@ class TestMainLaunch(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertTrue(any("8787" in s and "busy" in s for s in buf),
                         "expected an actionable 'port busy' message")
+
+    def test_recreate_tolerates_no_such_container_on_teardown(self):
+        # FIX P2: singleton exists-but-stopped -> RECREATE. If the scoped stop/rm
+        # race and report 'No such container', the plan must still reach the run.
+        def run(argv, **kwargs):
+            self.calls.append(argv)
+            two = tuple(argv[:2])
+            if two == ("docker", "info"):
+                return _proc(returncode=0)
+            if two == ("docker", "images"):
+                return _proc(returncode=0, stdout="sha256:present")
+            if two == ("docker", "ps") and "-a" in argv:
+                return _proc(returncode=0, stdout=dl.SINGLETON_NAME)
+            if two == ("docker", "ps"):
+                return _proc(returncode=0, stdout="")  # not running
+            if two in (("docker", "stop"), ("docker", "rm")):
+                return _proc(returncode=1, stderr="No such container: x")
+            if two == ("docker", "run"):
+                return _proc(returncode=0, stdout="containerid")
+            return _proc(returncode=0)
+        self.calls = []
+        with mock.patch("dashboard_launcher.subprocess.run", side_effect=run):
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = dl.main([])
+        self.assertEqual(rc, 0)
+        # Benign teardown failure did not abort the plan: the run happened.
+        self.assertTrue([c for c in self.calls if c[:2] == ["docker", "run"]])
 
     def test_successful_create_writes_registry_and_mountset(self):
         def run(argv, **kwargs):

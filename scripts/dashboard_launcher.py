@@ -9,14 +9,19 @@ foreground. Docker teardown is via ``--stop``.
 
 Two clean layers mirror ``dashboard_server.py`` and ``pr_resolver.py``:
 
-  (A) PURE, importable functions with NO side effects and NO live daemon — every
+  (A) PURE, importable functions with NO subprocess and NO live daemon — every
       argv builder, the registry parse/prune logic, the mount-composition
       helpers, the stdout parsers, and the ``plan_launch`` decision. All are
-      unit-tested without Docker.
+      unit-tested without Docker. (Registry/mountset read/write do touch the
+      host filesystem — see their own docstrings — but never docker.)
 
-  (B) A thin side-effect shell (``main`` + ``_run``) modeled verbatim on
+  (B) A thin side-effect shell — ``_run`` (the sole subprocess entry point) and
+      its callers (``main``, ``_launch``/``_build_plan``/``_run_plan``/
+      ``_execute_plan``, ``_stop``, ``_daemon_available``, and the foreground
+      ``_fallback`` which hands off via ``os.execvp``). ``_run`` is adapted from
       ``pr_resolver._run`` (``subprocess.run(..., shell=False, check=False,
-      capture_output=True, text=True)`` with a ``FileNotFoundError`` guard).
+      capture_output=True, text=True)`` with a ``FileNotFoundError`` guard) and
+      returns the CompletedProcess.
 
 CRITICAL mount composition: ``dashboard_server._resolve_roots`` ALWAYS appends
 ``docs/spec-loop`` to whatever ``--root`` it receives. So the launcher mounts the
@@ -83,18 +88,37 @@ def _registry_path(state_dir):
     return os.path.join(state_dir, REGISTRY_NAME)
 
 
+def _sanitize_registry(data):
+    """Keep only ``{str: number}`` entries from a decoded payload.
+
+    A non-dict payload degrades to ``{}``; within a dict, any entry whose value
+    is not an int/float (bool is excluded — it is an int subclass) is dropped so
+    the returned map upholds the ``{root: numeric last_seen}`` invariant and can
+    never make ``prune_stale``'s numeric comparison raise ``TypeError``."""
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool)}
+
+
 def read_registry(state_dir):
     """Load the registry map, or ``{}`` if absent/corrupt (never crash).
 
     HOST-only metadata — this file is NEVER mounted into the container. A
-    non-dict payload (or non-JSON) degrades to empty rather than propagating a
-    malformed shape downstream."""
+    non-dict payload (or non-JSON) degrades to empty, and any entry with a
+    non-numeric ``last_seen`` is dropped, rather than propagating a malformed
+    shape downstream. A corrupt/unreadable file emits a one-line stderr warning
+    so the reset (and the resulting loss of other roots) is OBSERVABLE."""
     try:
         with open(_registry_path(state_dir), "r", encoding="utf-8") as fh:
             data = json.load(fh)
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return {}
-    return data if isinstance(data, dict) else {}
+    except (OSError, ValueError) as err:
+        print(f"warning: registry at {_registry_path(state_dir)} unreadable "
+              f"({err}); starting fresh", file=sys.stderr)
+        return {}
+    return _sanitize_registry(data)
 
 
 def write_root_entry(state_dir, root, now):
@@ -172,6 +196,11 @@ def build_image_argv(tag, context_dir):
     context pinned to the repo checkout that holds the Dockerfile."""
     dockerfile = os.path.join(str(context_dir), "Dockerfile")
     return ["docker", "build", "-t", tag, "-f", dockerfile, str(context_dir)]
+
+
+def build_image_present_argv():
+    """``docker images -q <tag>`` — prints the image id when present."""
+    return ["docker", "images", "-q", IMAGE_TAG]
 
 
 def build_running_names_argv():
@@ -290,10 +319,11 @@ def plan_launch(daemon_available, image_present, running_names, all_names,
 
 def _run(argv):
     """Run one command via list-args (shell=False). Sole subprocess entry point —
-    mirrors ``pr_resolver._run`` so the no-shell-injection guarantee is provable
-    in one place. Returns the completed process; raises ``FileNotFoundError``
-    (via subprocess) when the binary is absent, which the caller treats as
-    'docker not installed -> fall back'."""
+    adapted from ``pr_resolver._run`` so the no-shell-injection guarantee is
+    provable in one place. Returns the ``subprocess.CompletedProcess`` (adapted,
+    not verbatim: callers read ``.returncode``/``.stdout``/``.stderr``); raises
+    ``FileNotFoundError`` (via subprocess) when the binary is absent, which the
+    caller treats as 'docker not installed -> fall back'."""
     return subprocess.run(
         argv, shell=False, check=False, capture_output=True, text=True,
     )
@@ -321,15 +351,20 @@ def _port_bound(stderr):
 def _fallback(reason):
     """Run the server directly in the FOREGROUND (docker absent / daemon down).
 
-    Prints a clear one-line message saying it fell back and WHY. This path does
-    NOT write the registry (the registry describes the container's mount set)."""
+    Prints a clear one-line message saying it fell back and WHY, then hands the
+    process off to the server via ``os.execvp`` so its live output (startup URL,
+    banner, errors) reaches the terminal and Ctrl-C works natively. The server
+    path is ABSOLUTE (pinned to this checkout, like the docker build context) so
+    it launches from any cwd; ``--root`` is the ABSOLUTE cwd the user invoked
+    from (the server confines reads within it). This path does NOT write the
+    registry (the registry describes the container's mount set). ``execvp``
+    replaces this process, so the flushed message is the last thing the launcher
+    itself prints."""
     print(f"docker unavailable ({reason}); "
-          f"falling back to a local foreground server", file=sys.stderr)
-    argv = ["python3", "scripts/dashboard_server.py", "--root", "."]
-    proc = _run(argv)
-    sys.stdout.write(proc.stdout)
-    sys.stderr.write(proc.stderr)
-    return proc.returncode
+          f"falling back to a local foreground server", file=sys.stderr, flush=True)
+    server = os.path.join(CONTEXT_DIR, "scripts", "dashboard_server.py")
+    argv = ["python3", server, "--root", os.path.abspath(os.getcwd())]
+    os.execvp(argv[0], argv)
 
 
 def _daemon_available():
@@ -356,13 +391,24 @@ def _handle_run_failure(proc, port):
     return 1
 
 
+def _no_such_container(stderr):
+    """True when a scoped ``docker stop``/``rm`` failed only because the target is
+    already gone — a benign race, not a real failure."""
+    return "no such container" in stderr.lower()
+
+
 def _execute_plan(decision, argvs, port):
     """Run a non-REUSE plan's argv sequence. The LAST argv is the ``docker run``;
     its failure is interpreted; every earlier step (build/stop/rm) must succeed
-    first. Returns ``(exit_code, ran_ok)``."""
+    first. A teardown step (stop/rm) that fails only with 'No such container' is
+    TOLERATED (a benign race — the container is already gone) and does not abort
+    the plan. Empty ``argvs`` never reaches the ``docker run`` step. Returns
+    ``(exit_code, ran_ok)``."""
+    if not argvs:
+        return _fallback("docker daemon not responding"), False
     for argv in argvs[:-1]:
         proc = _run(argv)
-        if proc.returncode != 0:
+        if proc.returncode != 0 and not _no_such_container(proc.stderr):
             print(f"{' '.join(argv[:2])} failed: {proc.stderr.strip()}",
                   file=sys.stderr)
             return 1, False
@@ -387,7 +433,11 @@ def read_mount_set(state_dir):
     try:
         with open(_mountset_path(state_dir), "r", encoding="utf-8") as fh:
             data = json.load(fh)
-    except (OSError, ValueError):
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as err:
+        print(f"warning: mountset at {_mountset_path(state_dir)} unreadable "
+              f"({err}); treating as unknown", file=sys.stderr)
         return None
     return list(data) if isinstance(data, list) else None
 
@@ -401,11 +451,18 @@ def write_mount_set(state_dir, roots):
 def _launch(now):
     """The docker-preferred launch path. Returns the process exit code.
 
-    Writes the registry timestamp ONLY after a successful run/reuse. Prints the
-    loopback URL and EXITS (does not hold a shell)."""
+    Registers this repo in the host registry BEFORE computing the plan so that
+    the freshly-launched singleton mounts it too; this pre-registration is
+    intentional and benign — a run that later fails simply leaves a timestamp
+    that self-expires via ``prune_stale``. The mount set (the container's actual
+    contents) is recorded only after a successful run. A missing binary or a
+    down daemon falls back to the foreground server; both distinguished by
+    reason. Prints the loopback URL and EXITS (does not hold a shell)."""
     available = _daemon_available()
     if available is None:
         return _fallback("docker not installed")
+    if not available:
+        return _fallback("docker daemon not responding")
     write_root_entry(STATE_DIR, os.getcwd(), now)  # register this repo first
     registry = read_registry(STATE_DIR)
     desired = desired_roots(registry, now, STALE_SECONDS, os.path.exists)
@@ -428,16 +485,16 @@ def _build_plan(available, desired):
                        current, desired)
 
 
-def build_image_present_argv():
-    return ["docker", "images", "-q", IMAGE_TAG]
-
-
 def _run_plan(plan, desired):
     decision, argvs = plan
     port = DEFAULT_PORT
     if decision == REUSE:
         print(f"dashboard already running; open {_loopback_url(port)}")
         return 0
+    # Belt-and-suspenders: FALLBACK (or any empty plan) must never reach
+    # _execute_plan, whose last-argv interpretation assumes a docker run.
+    if decision == FALLBACK or not argvs:
+        return _fallback("docker daemon not responding")
     code, ran_ok = _execute_plan(decision, argvs, port)
     if ran_ok:
         write_mount_set(STATE_DIR, desired)  # record what the singleton now runs
@@ -447,10 +504,18 @@ def _run_plan(plan, desired):
 
 def _stop():
     """Tear the singleton down via the scoped stop+rm sequence (name-scoped only).
-    A missing ``docker`` binary is reported, not crashed on."""
+
+    Honest about outcomes: a benign 'No such container' (already gone) is
+    tolerated, but any OTHER stop/rm failure surfaces the daemon's stderr and
+    returns nonzero — 'stopped' is claimed only when the container is actually
+    gone. A missing ``docker`` binary is reported, not crashed on."""
     try:
         for argv in build_teardown_argvs(SINGLETON_NAME):
-            _run(argv)  # best-effort: rm after stop; ignore 'no such container'
+            proc = _run(argv)  # rm after stop; 'no such container' is benign
+            if proc.returncode != 0 and not _no_such_container(proc.stderr):
+                print(f"{' '.join(argv[:2])} failed: {proc.stderr.strip()}",
+                      file=sys.stderr)
+                return 1
     except FileNotFoundError:
         print("docker not installed; nothing to stop", file=sys.stderr)
         return 1
