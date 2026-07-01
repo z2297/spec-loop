@@ -40,6 +40,7 @@ import json
 import os
 import subprocess
 import sys
+from collections import namedtuple
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -280,15 +281,22 @@ CREATE = "create"
 RECREATE = "recreate"
 REUSE = "reuse"
 
+# The live docker-state inputs to ``plan_launch``, grouped into one value object
+# (mirrors dashboard_server's Response/NetworkConfig convention) so the pure
+# decision takes 3 args instead of 6. All four fields are plain data from the
+# parsers — no subprocess — keeping plan_launch fully unit-testable.
+DaemonState = namedtuple(
+    "DaemonState", "daemon_available image_present running_names all_names")
 
-def plan_launch(daemon_available, image_present, running_names, all_names,
-                current_roots, desired):
+
+def plan_launch(state, current_roots, desired):
     """Pure launch decision — returns ``(decision, [argv, ...])``.
 
     Inputs are plain data (no subprocess), so this is fully unit-testable:
-      * ``daemon_available`` — from ``parse_daemon_available``;
-      * ``image_present`` — from ``parse_image_present``;
-      * ``running_names`` / ``all_names`` — from the ps parsers;
+      * ``state`` — a ``DaemonState`` bundling ``daemon_available`` (from
+        ``parse_daemon_available``), ``image_present`` (from
+        ``parse_image_present``), and ``running_names`` / ``all_names`` (from the
+        ps parsers);
       * ``current_roots`` — the singleton's current container-root set (or None
         when it is not running);
       * ``desired`` — the desired HOST root list (already pruned/sorted).
@@ -301,13 +309,13 @@ def plan_launch(daemon_available, image_present, running_names, all_names,
       CREATE        no singleton at all -> run.
       REUSE         running with an unchanged root set -> nothing to do.
     """
-    if not daemon_available:
+    if not state.daemon_available:
         return FALLBACK, []
     run = build_run_argv(SINGLETON_NAME, IMAGE_TAG, DEFAULT_PORT, desired)
-    if not image_present:
+    if not state.image_present:
         return BUILD_CREATE, [build_image_argv(IMAGE_TAG, CONTEXT_DIR), run]
-    is_running = SINGLETON_NAME in running_names
-    exists = SINGLETON_NAME in all_names
+    is_running = SINGLETON_NAME in state.running_names
+    exists = SINGLETON_NAME in state.all_names
     if is_running and current_roots == desired:
         return REUSE, []
     if exists:
@@ -483,8 +491,8 @@ def _build_plan(available, desired):
     running = parse_running_names(_run(build_running_names_argv()).stdout)
     all_names = parse_all_names(_run(build_all_names_argv()).stdout)
     current = read_mount_set(STATE_DIR) if SINGLETON_NAME in running else None
-    return plan_launch(available, image_present, running, all_names,
-                       current, desired)
+    state = DaemonState(available, image_present, running, all_names)
+    return plan_launch(state, current, desired)
 
 
 def _run_plan(plan, desired):

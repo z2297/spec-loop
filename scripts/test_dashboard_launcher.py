@@ -384,18 +384,23 @@ class TestPlanLaunch(unittest.TestCase):
     def setUp(self):
         self.roots = ["/a", "/b"]
 
+    def _state(self, daemon_available=True, image_present=True,
+               running_names=None, all_names=None):
+        """Build a DaemonState for plan_launch (groups the four live-docker-state
+        inputs into the value object plan_launch now takes)."""
+        return dl.DaemonState(daemon_available, image_present,
+                              running_names or set(), all_names or set())
+
     def test_no_daemon_is_fallback(self):
         decision, argvs = dl.plan_launch(
-            daemon_available=False, image_present=True,
-            running_names=set(), all_names=set(),
+            self._state(daemon_available=False),
             current_roots=None, desired=self.roots)
         self.assertEqual(decision, dl.FALLBACK)
         self.assertEqual(argvs, [])
 
     def test_image_absent_builds_then_runs(self):
         decision, argvs = dl.plan_launch(
-            daemon_available=True, image_present=False,
-            running_names=set(), all_names=set(),
+            self._state(image_present=False),
             current_roots=None, desired=self.roots)
         self.assertEqual(decision, dl.BUILD_CREATE)
         self.assertEqual(argvs[0][:2], ["docker", "build"])
@@ -403,8 +408,7 @@ class TestPlanLaunch(unittest.TestCase):
 
     def test_no_singleton_creates(self):
         decision, argvs = dl.plan_launch(
-            daemon_available=True, image_present=True,
-            running_names=set(), all_names=set(),
+            self._state(),
             current_roots=None, desired=self.roots)
         self.assertEqual(decision, dl.CREATE)
         self.assertEqual(len(argvs), 1)
@@ -412,16 +416,16 @@ class TestPlanLaunch(unittest.TestCase):
 
     def test_running_with_unchanged_roots_reuses(self):
         decision, argvs = dl.plan_launch(
-            daemon_available=True, image_present=True,
-            running_names={dl.SINGLETON_NAME}, all_names={dl.SINGLETON_NAME},
+            self._state(running_names={dl.SINGLETON_NAME},
+                        all_names={dl.SINGLETON_NAME}),
             current_roots=self.roots, desired=self.roots)
         self.assertEqual(decision, dl.REUSE)
         self.assertEqual(argvs, [])
 
     def test_running_with_changed_roots_recreates(self):
         decision, argvs = dl.plan_launch(
-            daemon_available=True, image_present=True,
-            running_names={dl.SINGLETON_NAME}, all_names={dl.SINGLETON_NAME},
+            self._state(running_names={dl.SINGLETON_NAME},
+                        all_names={dl.SINGLETON_NAME}),
             current_roots=["/a"], desired=self.roots)
         self.assertEqual(decision, dl.RECREATE)
         # scoped stop + rm, then run
@@ -433,8 +437,7 @@ class TestPlanLaunch(unittest.TestCase):
         # In all_names but not running -> scoped rm before run, never a bare run
         # that would collide on the name.
         decision, argvs = dl.plan_launch(
-            daemon_available=True, image_present=True,
-            running_names=set(), all_names={dl.SINGLETON_NAME},
+            self._state(all_names={dl.SINGLETON_NAME}),
             current_roots=None, desired=self.roots)
         self.assertEqual(decision, dl.RECREATE)
         self.assertEqual(argvs[0], ["docker", "stop", dl.SINGLETON_NAME])
