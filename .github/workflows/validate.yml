@@ -18,6 +18,12 @@ jobs:
       - name: Self-contained manifest validation
         run: python3 scripts/validate_marketplace.py .
 
+      - name: Python unittest suite
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+
+      - name: Coverage floor gate (stdlib trace, no-regression)
+        run: python3 scripts/measure_coverage.py
+
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
