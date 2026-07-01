@@ -621,7 +621,7 @@ def _host_allowlist(port):
     return {f"127.0.0.1:{port}", f"localhost:{port}"}
 
 
-def main() -> int:
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="read-only spec-loop dashboard server")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT,
                     help=f"port to serve on (default: {DEFAULT_PORT})")
@@ -635,7 +635,7 @@ def main() -> int:
     ap.add_argument("--advertise-port", type=int, default=None,
                     help="published port a browser targets; drives the Host "
                          "allowlist (default: --port).")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     raw_roots = args.root or ["."]
     roots = [str(Path(r).resolve()) for r in raw_roots]

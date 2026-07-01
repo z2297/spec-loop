@@ -13,12 +13,16 @@ Usage:
     python3 scripts/test_dashboard_server.py
 """
 
+import contextlib
 import http.client
+import io
 import json
 import os
 import sys
+import tempfile
 import threading
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -692,6 +696,323 @@ class MultiRootHttpTests(unittest.TestCase):
         resp.read()
         conn.close()
         self.assertEqual(resp.status, 421)
+
+
+# --------------------------------------------------------------------------
+# In-thread handler unit tests — exercise the request/response path on the
+# TEST thread so measure_coverage's per-thread trace can see it.
+#
+# WHY: measure_coverage.py runs the suite under trace.Trace(count=1), which
+# records ONLY the calling thread. The socket tests above drive the handler on
+# a daemon serve_forever thread, so the handler body is behaviorally exercised
+# but invisible to the line tracer. These tests call the same methods directly
+# on the test thread. They are ADDITIVE coverage-visibility mirrors — the
+# real-socket suites above remain the authoritative security check for the
+# loopback bind / Host allowlist / traversal-confinement / no-oracle-404
+# invariants, and are left untouched. No security primitive is stubbed here:
+# the real _host_allowed / resolve_within / os.path.isfile run.
+# --------------------------------------------------------------------------
+
+def make_handler(tmp: Path):
+    """Return (bound_handler_instance, docs_path). Build the bound handler class
+    via build_server (the single wiring authority) so roots/assets_root/
+    allowed_hosts are injected exactly as in production, then instantiate it
+    WITHOUT the socket handshake (__new__, no __init__). The minimal attributes
+    _emit needs on the test thread are set; send_response/send_header/end_headers
+    run FOR REAL against a BytesIO wfile — no call-spies."""
+    docs = build_fixture(tmp)
+    assets = tmp / "assets"
+    assets.mkdir()
+    (assets / "index.html").write_text("<!doctype html><title>dash</title>")
+    (assets / "app.css").write_text("body{color:#fff}")
+    (tmp / "outside_secret.txt").write_text("TOP SECRET")
+    server = ds.build_server(tmp, assets_dir=assets, port=0)
+    bound = server.RequestHandlerClass
+    server.server_close()  # we never serve; we invoke methods directly
+
+    handler = bound.__new__(bound)
+    handler.wfile = io.BytesIO()
+    handler.request_version = "HTTP/1.1"
+    handler.requestline = "GET / HTTP/1.1"
+    handler.command = "GET"
+    handler.headers = {}
+    return handler, docs
+
+
+def emit_wire(handler, resp, write_body=True):
+    """Run _emit for real and return the raw emitted bytes."""
+    handler.wfile = io.BytesIO()
+    handler._emit(resp, write_body=write_body)
+    return handler.wfile.getvalue()
+
+
+class ContentTypeTests(unittest.TestCase):
+    def test_known_extensions_map_exactly(self):
+        cases = {
+            "index.html": "text/html; charset=utf-8",
+            "app.css": "text/css; charset=utf-8",
+            "app.js": "application/javascript; charset=utf-8",
+            "data.json": "application/json; charset=utf-8",
+            "icon.svg": "image/svg+xml",
+            "ICON.SVG": "image/svg+xml",  # case-insensitive suffix
+        }
+        for name, expected in cases.items():
+            self.assertEqual(ds._content_type(name), expected, name)
+
+    def test_unknown_extension_is_octet_stream(self):
+        self.assertEqual(ds._content_type("archive.tar"), "application/octet-stream")
+        self.assertEqual(ds._content_type("noext"), "application/octet-stream")
+
+
+class ResponseHelperTests(unittest.TestCase):
+    def test_json_response_shape(self):
+        resp = ds._json_response({"a": 1})
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.content_type, "application/json; charset=utf-8")
+        self.assertEqual(json.loads(resp.body), {"a": 1})
+        self.assertIsNone(resp.etag)
+
+    def test_text_helper_shape(self):
+        resp = ds._text(404, b"not found")
+        self.assertEqual(resp.status, 404)
+        self.assertEqual(resp.body, b"not found")
+        self.assertEqual(resp.content_type, "text/plain")
+
+
+class HandlerUnitTests(unittest.TestCase):
+    """Direct, in-thread invocation of the handler methods (real primitives)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self.tmpdir.name)
+        self.handler, self.docs = make_handler(self.tmp)
+        # A single-root server -> exactly one ("", data_root) pair.
+        self.host = next(iter(self.handler.allowed_hosts))
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    # --- _emit runs for real; assert the emitted wire bytes (behavioral) ---
+
+    def test_emit_includes_security_and_length_headers(self):
+        wire = emit_wire(self.handler, ds._json_response({"ok": True})).decode("latin-1")
+        head, body = wire.split("\r\n\r\n", 1)
+        self.assertIn("HTTP/1.1 200", head)
+        # nosniff is a real security header asserted by NO socket test.
+        self.assertIn("X-Content-Type-Options: nosniff", head)
+        self.assertIn("Content-Type: application/json; charset=utf-8", head)
+        self.assertIn(f"Content-Length: {len(body.encode('latin-1'))}", head)
+        self.assertEqual(json.loads(body), {"ok": True})
+
+    def test_emit_etag_present_only_when_set(self):
+        with_etag = emit_wire(
+            self.handler, ds.Response(200, b"x", "text/plain", '"tag123"')
+        ).decode("latin-1")
+        self.assertIn('ETag: "tag123"', with_etag)
+        without = emit_wire(
+            self.handler, ds.Response(200, b"x", "text/plain")
+        ).decode("latin-1")
+        self.assertNotIn("ETag:", without)
+
+    def test_emit_head_writes_no_body(self):
+        wire = emit_wire(
+            self.handler, ds._json_response({"ok": True}), write_body=False
+        ).decode("latin-1")
+        _head, body = wire.split("\r\n\r\n", 1)
+        self.assertEqual(body, "")
+
+    # --- _content_type / static via real resolve_within ---
+
+    def test_serve_static_index_and_css(self):
+        idx = self.handler._serve_static("/")
+        self.assertEqual(idx.status, 200)
+        self.assertTrue(idx.content_type.startswith("text/html"))
+        css = self.handler._serve_static("/app.css")
+        self.assertEqual(css.status, 200)
+        self.assertEqual(css.content_type, "text/css; charset=utf-8")
+
+    def test_serve_static_missing_file_is_404(self):
+        resp = self.handler._serve_static("/nope.html")
+        self.assertEqual(resp.status, 404)
+
+    def test_serve_static_traversal_is_404_real_resolve_within(self):
+        # Real resolve_within runs; a traversal must NOT reach outside_secret.txt.
+        for route in ("/../outside_secret.txt", "/../../etc/passwd"):
+            resp = self.handler._serve_static(route)
+            self.assertEqual(resp.status, 404, route)
+            self.assertNotIn(b"TOP SECRET", resp.body)
+
+    def test_read_asset_returns_bytes_and_none_on_error(self):
+        target = ds.resolve_within(self.handler.assets_root, "index.html")
+        self.assertIsNotNone(target)
+        self.assertIn(b"<!doctype html>", self.handler._read_asset(target).lower())
+        # A directory (not a file) -> OSError inside open() -> None.
+        self.assertIsNone(self.handler._read_asset(self.handler.assets_root))
+
+    # --- _host_allowed / _route with the REAL allowlist (no stubbing) ---
+
+    def test_host_allowed_true_for_allowlisted_host(self):
+        self.handler.headers = {"Host": self.host}
+        self.assertTrue(self.handler._host_allowed())
+
+    def test_host_allowed_false_for_foreign_host(self):
+        self.handler.headers = {"Host": "evil.com"}
+        self.assertFalse(self.handler._host_allowed())
+
+    def test_host_allowed_false_for_absent_host(self):
+        self.handler.headers = {}  # .get("Host") is None -> distinct branch
+        self.assertFalse(self.handler._host_allowed())
+
+    def test_route_disallowed_host_returns_421(self):
+        self.handler.headers = {"Host": "evil.com"}
+        self.handler.path = "/api/runs"
+        resp = self.handler._route()
+        self.assertEqual(resp.status, 421)
+
+    def test_route_api_runs_ok(self):
+        self.handler.headers = {"Host": self.host}
+        self.handler.path = "/api/runs"
+        resp = self.handler._route()
+        self.assertEqual(resp.status, 200)
+        self.assertIn(b"run-normal", resp.body)
+
+    def test_route_api_run_detail_ok_and_missing(self):
+        self.handler.headers = {"Host": self.host}
+        self.handler.path = "/api/runs/run-normal"
+        ok = self.handler._route()
+        self.assertEqual(ok.status, 200)
+        self.assertEqual(json.loads(ok.body)["run_id"], "run-normal")
+        self.handler.path = "/api/runs/does-not-exist"
+        miss = self.handler._route()
+        self.assertEqual(miss.status, 404)
+
+    def test_route_static_index(self):
+        self.handler.headers = {"Host": self.host}
+        self.handler.path = "/"
+        resp = self.handler._route()
+        self.assertEqual(resp.status, 200)
+        self.assertIn(b"<!doctype html>", resp.body.lower())
+
+    # --- _not_modified with the real If-None-Match header ---
+
+    def test_not_modified_returns_304_on_match(self):
+        self.handler.headers = {"If-None-Match": '"etag-1"'}
+        resp = self.handler._not_modified('"etag-1"')
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp.status, 304)
+        self.assertEqual(resp.body, b"")
+
+    def test_not_modified_returns_none_on_mismatch(self):
+        self.handler.headers = {"If-None-Match": '"other"'}
+        self.assertIsNone(self.handler._not_modified('"etag-1"'))
+
+    def test_api_runs_304_via_route(self):
+        # End-to-end in-thread: fetch etag, then a matching If-None-Match -> 304.
+        self.handler.headers = {"Host": self.host}
+        self.handler.path = "/api/runs/run-normal"
+        first = self.handler._route()
+        self.assertEqual(first.status, 200)
+        self.assertIsNotNone(first.etag)
+        self.handler.headers = {"Host": self.host, "If-None-Match": first.etag}
+        second = self.handler._route()
+        self.assertEqual(second.status, 304)
+
+    def test_collection_material_ok(self):
+        # /api/runs -> _serve_api_runs -> _collection_material (happy path).
+        self.handler.headers = {"Host": self.host}
+        self.handler.path = "/api/runs"
+        resp = self.handler._route()
+        self.assertEqual(resp.status, 200)
+
+    def test_collection_material_weak_key_when_run_unresolvable(self):
+        # A run listed at scan time but not resolvable within its owning root
+        # (e.g. a concurrent delete between the two globs) yields the weaker "-"
+        # cache key rather than crashing. Exercise that else-branch directly with
+        # a fabricated run id that scan_all_roots surfaces but _resolve_run_dir
+        # cannot resolve.
+        material = self.handler._collection_material([{"run_id": "vanished"}])
+        self.assertEqual(material, ["vanished:-"])
+
+
+# --------------------------------------------------------------------------
+# main() entrypoint — argparse + wiring, no blocking serve_forever
+# --------------------------------------------------------------------------
+
+class MainEntrypointTests(unittest.TestCase):
+    """Drive main(argv) with the ThreadingHTTPServer seam mocked so the real
+    build_server wiring (_resolve_roots + _host_allowlist) runs but the process
+    never blocks on serve_forever. Every invocation pins --port 0."""
+
+    def _fake_server(self):
+        srv = mock.MagicMock()
+        srv.server_address = ("127.0.0.1", 0)
+        srv.serve_forever.side_effect = KeyboardInterrupt  # graceful-stop branch
+        return srv
+
+    @contextlib.contextmanager
+    def _mocked_serve(self):
+        """Patch the ThreadingHTTPServer seam and capture both streams so main()
+        runs its real wiring without blocking. Yields (fake_server, out, err)."""
+        fake = self._fake_server()
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(ds, "ThreadingHTTPServer", return_value=fake), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            yield fake, out, err
+
+    def test_main_wires_server_and_stops_gracefully(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "docs" / "spec-loop" / "r").mkdir(parents=True)
+            (root / "docs" / "spec-loop" / "r" / "dag.json").write_text(
+                json.dumps({"slices": [slice_obj("s1", status="pending")]})
+            )
+            with self._mocked_serve() as (fake, out, _err):
+                rc = ds.main(["--root", str(root), "--port", "0"])
+            self.assertEqual(rc, 0)
+            fake.serve_forever.assert_called_once()
+            fake.server_close.assert_called_once()  # finally: ran
+            self.assertIn("stopping", out.getvalue())
+
+    def test_main_warns_on_nonexistent_root(self):
+        with tempfile.TemporaryDirectory() as d:
+            # A root with NO docs/spec-loop -> warning to stderr.
+            root = Path(d) / "empty-root"
+            root.mkdir()
+            with self._mocked_serve() as (_fake, _out, err):
+                rc = ds.main(["--root", str(root), "--port", "0"])
+            self.assertEqual(rc, 0)
+            self.assertIn("does not exist", err.getvalue())
+
+    def test_main_default_root_is_cwd(self):
+        # No --root -> defaults to "." (cwd). Run inside a fresh tmp cwd so the
+        # default-root branch (raw_roots = ["."]) is exercised without touching
+        # the live checkout.
+        with tempfile.TemporaryDirectory() as d:
+            prev = os.getcwd()
+            os.chdir(d)
+            try:
+                # Wrap the real build_server to capture the resolved root the
+                # default branch (raw_roots = ["."]) produced.
+                captured = {}
+                real_build = ds.build_server
+
+                def spy_build(root, *a, **kw):
+                    captured["root"] = root
+                    return real_build(root, *a, **kw)
+
+                with self._mocked_serve() as (_fake, out, _err), \
+                        mock.patch.object(ds, "build_server", side_effect=spy_build):
+                    rc = ds.main(["--port", "0"])
+                self.assertEqual(rc, 0)
+                # The default root "." resolved to the current (tmp) cwd, not the
+                # live checkout — an observable effect of the default-root branch.
+                self.assertEqual(
+                    [os.path.realpath(r) for r in captured["root"]],
+                    [os.path.realpath(d)],
+                )
+                self.assertIn("serving 1 root(s)", out.getvalue())
+            finally:
+                os.chdir(prev)
 
 
 if __name__ == "__main__":
