@@ -215,6 +215,112 @@ class ScanRunsTests(unittest.TestCase):
         run = self.runs_by_id()["run-normal"]
         self.assertEqual(run["request_excerpt"], "First meaningful line of the request.")
 
+    def test_slices_not_a_list_is_unreadable_via_type_raise(self):
+        # A dag.json that is valid JSON but whose "slices" is the WRONG TYPE (an
+        # object, not a list) must degrade to unreadable — the explicit
+        # `raise ValueError("slices is not a list")` path, distinct from the
+        # broken-JSON path the corrupt-run fixture already covers. Siblings survive.
+        with tempfile.TemporaryDirectory() as d:
+            docs = Path(d) / "docs" / "spec-loop"
+            (docs / "run-badtype").mkdir(parents=True)
+            (docs / "run-badtype" / "dag.json").write_text(
+                json.dumps({"base_ref": "alpha", "slices": {"not": "a list"}})
+            )
+            write_dag(docs / "run-ok", [slice_obj("s1", status="pending")])
+            runs = {r["run_id"]: r for r in ds.scan_runs(docs)}
+            self.assertEqual(runs["run-badtype"]["status"], "unreadable")
+            self.assertNotEqual(runs["run-ok"].get("status"), "unreadable")
+            self.assertIn("slices", runs["run-ok"])
+
+    def test_dependency_cycle_yields_no_infinite_loop_and_omits_stuck_slices(self):
+        # Two pending slices depending on each OTHER can never become ready, so the
+        # wave derivation must break out (not loop forever) and honestly omit them
+        # from every wave — the unsatisfiable-deps `break`.
+        with tempfile.TemporaryDirectory() as d:
+            docs = Path(d) / "docs" / "spec-loop"
+            write_dag(docs / "r", [
+                slice_obj("s1", status="complete"),
+                slice_obj("x", deps=["y"], status="pending"),   # cycle: x<->y
+                slice_obj("y", deps=["x"], status="pending"),
+                slice_obj("z", deps=["missing"], status="pending"),  # dep never exists
+            ])
+            run = next(r for r in ds.scan_runs(docs) if r["run_id"] == "r")
+            flat = [sid for w in run["waves"] for sid in w]
+            # The mutually/impossibly blocked slices appear in NO wave.
+            self.assertNotIn("x", flat)
+            self.assertNotIn("y", flat)
+            self.assertNotIn("z", flat)
+            # ...and their honest per-slice label is blocked-pending, not runnable.
+            labels = {s["id"]: s["label"] for s in run["slices"]}
+            self.assertEqual(labels["x"], "blocked-pending")
+            self.assertEqual(labels["z"], "blocked-pending")
+
+    def test_escalation_header_without_close_bracket_is_ignored(self):
+        # A `## [`-prefixed line with NO closing `]` yields token None ->
+        # _iter_escalation_headers `continue`s (the block is silently skipped, no
+        # crash, no phantom escalation). Assert via observable state: no such token.
+        with tempfile.TemporaryDirectory() as d:
+            docs = Path(d) / "docs" / "spec-loop"
+            write_dag(docs / "r", [slice_obj("s1", status="pending")])
+            (docs / "r" / "escalations.md").write_text(
+                "# Escalations\n\n## [unclosed header with no bracket\nAnswer:\n"
+            )
+            run = next(r for r in ds.scan_runs(docs) if r["run_id"] == "r")
+            self.assertEqual(run["open_escalations"], [])
+            # s1 has no open/answered escalation -> derives from deps only.
+            labels = {s["id"]: s["label"] for s in run["slices"]}
+            self.assertEqual(labels["s1"], "runnable-pending")
+
+    def test_escalation_header_no_status_marker_is_unknown_state(self):
+        # A header with a bracket token but NEITHER a (status: ...) marker NOR a
+        # filled Answer -> _header_state returns "" (unknown). The slice is then
+        # neither awaiting-human nor redispatch-pending; it derives from deps.
+        with tempfile.TemporaryDirectory() as d:
+            docs = Path(d) / "docs" / "spec-loop"
+            write_dag(docs / "r", [
+                slice_obj("s1", status="complete"),
+                slice_obj("s2", deps=["s1"], status="pending"),
+            ])
+            (docs / "r" / "escalations.md").write_text(
+                "# Escalations\n\n## [s2] a note with no status and no answer\nAnswer:\n"
+            )
+            run = next(r for r in ds.scan_runs(docs) if r["run_id"] == "r")
+            # Unknown state -> not OPEN (no awaiting-human) and not ANSWERED.
+            self.assertNotIn("s2", {e["token"] for e in run["open_escalations"]})
+            labels = {s["id"]: s["label"] for s in run["slices"]}
+            self.assertEqual(labels["s2"], "runnable-pending")
+
+
+class EscalationHelperUnitTests(unittest.TestCase):
+    """Direct unit tests of the pure escalation-parser helpers (their fallthrough
+    return branches), asserting the returned value contract."""
+
+    def test_parse_header_without_close_bracket_returns_none_token(self):
+        self.assertEqual(
+            ds._parse_escalation_header("## [no closing bracket here"),
+            (None, "", ""),
+        )
+
+    def test_parse_header_with_close_bracket_and_no_status(self):
+        # Reaches _header_state's "" fallthrough (neither OPEN nor ANSWERED).
+        token, title, state = ds._parse_escalation_header("## [s2] plain title")
+        self.assertEqual(token, "s2")
+        self.assertEqual(title, "plain title")
+        self.assertEqual(state, "")
+
+    def test_header_state_unknown_returns_empty(self):
+        self.assertEqual(ds._header_state("no marker present"), "")
+        self.assertEqual(ds._header_state("(status: OPEN)"), "OPEN")
+        self.assertEqual(ds._header_state("(status: ANSWERED)"), "ANSWERED")
+
+    def test_has_filled_answer_false_when_no_answer_line(self):
+        # No body line begins with "Answer:" at all -> the terminal `return False`.
+        self.assertFalse(ds._has_filled_answer(["some prose", "- not an answer line"]))
+        self.assertFalse(ds._has_filled_answer([]))
+        # Sanity: a filled Answer is True (distinguishes from the empty-Answer case).
+        self.assertTrue(ds._has_filled_answer(["- Answer: yes go ahead"]))
+        self.assertFalse(ds._has_filled_answer(["Answer:   "]))
+
 
 # --------------------------------------------------------------------------
 # Containment-helper unit tests
@@ -260,6 +366,19 @@ class ContainmentTests(unittest.TestCase):
         except (OSError, NotImplementedError):
             self.skipTest("symlinks unsupported on this platform")
         self.assertIsNone(ds.resolve_within(self.root, "link"))
+
+    def test_commonpath_valueerror_denies_containment(self):
+        # SECURITY contract: if the final commonpath containment check itself
+        # errors, resolve_within must DENY (return None), never fall through to a
+        # permit. On POSIX both args are absolute realpaths, so a crafted relpath
+        # cannot make commonpath raise ValueError through the public interface —
+        # the only way to reach that except-branch is if commonpath raises, so we
+        # force exactly that. The real isabs / null-byte / realpath checks still
+        # run; only the collision-detector (a stdlib helper, NOT a security
+        # primitive) is made to error, proving deny-on-error.
+        with mock.patch("dashboard_server.os.path.commonpath",
+                        side_effect=ValueError("mixed drives")):
+            self.assertIsNone(ds.resolve_within(self.root, "ok.txt"))
 
 
 # --------------------------------------------------------------------------
@@ -932,6 +1051,124 @@ class HandlerUnitTests(unittest.TestCase):
         # cannot resolve.
         material = self.handler._collection_material([{"run_id": "vanished"}])
         self.assertEqual(material, ["vanished:-"])
+
+    # --- verb entry points invoked directly (trace-visible on the test thread) ---
+    # The real-socket suites above exercise these behaviorally, but measure_coverage's
+    # per-thread trace can't see the daemon serve_forever thread. These call the
+    # entry points on the test thread through the REAL _route/_emit/_host_allowed.
+
+    def test_do_get_emits_full_response_with_body(self):
+        self.handler.headers = {"Host": self.host}
+        self.handler.path = "/api/runs"
+        self.handler.wfile = io.BytesIO()
+        self.handler.do_GET()
+        wire = self.handler.wfile.getvalue().decode("latin-1")
+        head, body = wire.split("\r\n\r\n", 1)
+        self.assertIn("HTTP/1.1 200", head)
+        self.assertIn("run-normal", body)  # GET writes the real body
+
+    def test_do_head_emits_headers_but_no_body(self):
+        self.handler.headers = {"Host": self.host}
+        self.handler.path = "/api/runs"
+        self.handler.wfile = io.BytesIO()
+        self.handler.do_HEAD()
+        wire = self.handler.wfile.getvalue().decode("latin-1")
+        head, body = wire.split("\r\n\r\n", 1)
+        self.assertIn("HTTP/1.1 200", head)
+        # A Content-Length is still advertised, but no body bytes are written.
+        self.assertIn("Content-Length:", head)
+        self.assertEqual(body, "")
+
+    def test_rejected_verb_entry_emits_405(self):
+        # do_POST is bound to _reject_method (as are PUT/DELETE/PATCH/OPTIONS).
+        # Invoke the entry point directly and assert the 405 on the wire — the
+        # GET/HEAD-only guarantee, expressed through the real _emit.
+        self.handler.headers = {"Host": self.host}
+        self.handler.path = "/api/runs"
+        self.handler.wfile = io.BytesIO()
+        self.handler.do_POST()
+        wire = self.handler.wfile.getvalue().decode("latin-1")
+        head, body = wire.split("\r\n\r\n", 1)
+        self.assertIn("HTTP/1.1 405", head)
+        self.assertIn("method not allowed", body)
+
+    def test_do_get_foreign_host_emits_421_on_wire(self):
+        # The anti-DNS-rebinding deny, exercised through the REAL do_GET -> _route
+        # -> _host_allowed on the test thread (trace-visible mirror of the socket
+        # suite's 421 assertions). A forged Host must yield 421 misdirected request.
+        self.handler.headers = {"Host": "evil.com"}
+        self.handler.path = "/api/runs"
+        self.handler.wfile = io.BytesIO()
+        self.handler.do_GET()
+        wire = self.handler.wfile.getvalue().decode("latin-1")
+        head, body = wire.split("\r\n\r\n", 1)
+        self.assertIn("HTTP/1.1 421", head)
+        self.assertIn("misdirected request", body)
+
+    def test_serve_static_unreadable_file_is_404_no_partial_body(self):
+        # A target that PASSES resolve_within + os.path.isfile but whose read
+        # fails (e.g. a concurrent unlink / permission flip between the checks)
+        # must return a clean 404 with no body, never a partial/garbled asset.
+        # We force _read_asset to report the file gone; the real resolve_within +
+        # isfile still run against a genuine existing index.html.
+        with mock.patch.object(self.handler, "_read_asset", return_value=None):
+            resp = self.handler._serve_static("/")
+        self.assertEqual(resp.status, 404)
+        self.assertEqual(resp.body, b"not found")
+
+
+class MultiRootHandlerUnitTests(unittest.TestCase):
+    """In-thread (trace-visible) invocation of the MULTI-root owning-root /
+    run-dir resolution miss branches. A single-root handler short-circuits
+    _owning_root at its len==1/empty-key guard and never reaches the partition/
+    match/miss branches, so these need a genuine two-root bound handler."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self.tmpdir.name)
+        self.root_a = self.tmp / "repo-a"
+        self.root_b = self.tmp / "repo-b"
+        for root, only_run in ((self.root_a, "only-a"), (self.root_b, "only-b")):
+            write_dag(root / "docs" / "spec-loop" / only_run,
+                      [slice_obj("s1", status="complete")])
+        assets = self.tmp / "assets"
+        assets.mkdir()
+        (assets / "index.html").write_text("<!doctype html>")
+        server = ds.build_server([str(self.root_a), str(self.root_b)],
+                                 assets_dir=assets, port=0)
+        self.handler = server.RequestHandlerClass.__new__(server.RequestHandlerClass)
+        server.server_close()
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_owning_root_matches_known_key_and_returns_bare_id(self):
+        # The partition + matched-key branch: a valid namespaced id resolves to
+        # its owning root and the bare run id.
+        root_key, data_root, run_id = self.handler._owning_root("repo-b:only-b")
+        self.assertEqual(root_key, "repo-b")
+        self.assertEqual(run_id, "only-b")
+        self.assertTrue(str(data_root).endswith("repo-b/docs/spec-loop"))
+
+    def test_owning_root_unknown_key_returns_none(self):
+        # The no-match miss branch: an unknown root key owns nothing -> ("", None, None).
+        self.assertEqual(
+            self.handler._owning_root("nosuchrepo:only-a"), ("", None, None))
+        # A bare (keyless) id also matches no root key in multi-root mode.
+        self.assertEqual(self.handler._owning_root("only-a"), ("", None, None))
+
+    def test_resolve_run_dir_unknown_root_key_returns_empty_none(self):
+        # data_root is None (no owning root) -> _resolve_run_dir returns ("", None),
+        # the uniform "no such run" miss (no oracle for key-exists-vs-not).
+        self.assertEqual(
+            self.handler._resolve_run_dir("nosuchrepo:only-a"), ("", None))
+
+    def test_resolve_run_dir_known_key_missing_run_returns_key_none(self):
+        # Matched key but the bare run id isn't among that root's discovered runs
+        # -> (root_key, None). 'only-b' lives only in root B, so under root A it misses.
+        root_key, run_dir = self.handler._resolve_run_dir("repo-a:only-b")
+        self.assertEqual(root_key, "repo-a")
+        self.assertIsNone(run_dir)
 
 
 # --------------------------------------------------------------------------
