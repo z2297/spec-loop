@@ -120,8 +120,8 @@ const CLIENT_SOURCE = extractClientSource();
 const mod = await loadClientModule(CLIENT_SOURCE);
 mod.__setDocument(makeDom());
 
-// small helpers to query the shim tree
-const elementsOf = (node) => node.childNodes.filter((n) => n.nodeType === 1);
+// Element children are read via the shim's spec-accurate `.children` getter
+// (element nodes only), the same accessor the XSS invariant test leans on.
 
 // ---- 1. loader + smoke: exposes exactly the expected surface, no bootstrap ----
 test("module exposes exactly the expected function surface", () => {
@@ -278,7 +278,7 @@ test("sliceRow yields 7 cells with truncated goal and an allowlisted label class
     id: "s1", goal: longGoal, risk_tier: 2, depth: 0, parent: null,
     deps: ["s0"], label: "complete",
   });
-  const cells = elementsOf(row);
+  const cells = row.children;
   assert.equal(cells.length, 7);
   assert.equal(cells[0].textContent, "s1");
   assert.ok(cells[1].textContent.endsWith("…"), "long goal is truncated with an ellipsis");
@@ -287,7 +287,7 @@ test("sliceRow yields 7 cells with truncated goal and an allowlisted label class
   assert.equal(cells[3].textContent, "0");   // depth
   assert.equal(cells[4].textContent, "—");   // null parent renders as em dash
   assert.equal(cells[5].textContent, "s0");  // deps joined
-  const labelPill = elementsOf(cells[6])[0];
+  const labelPill = cells[6].children[0];
   assert.match(labelPill.className, /lbl-complete/);
 });
 
@@ -296,10 +296,10 @@ test("sliceRow maps an unknown label to the lbl-unknown fallback class", () => {
     id: "s2", goal: "x", risk_tier: 1, depth: 0, parent: "s1", deps: [],
     label: "some-bogus-label",
   });
-  const cells = elementsOf(row);
+  const cells = row.children;
   assert.equal(cells[4].textContent, "s1");  // non-null parent shown verbatim
   assert.equal(cells[5].textContent, "—");   // empty deps render as em dash
-  const labelPill = elementsOf(cells[6])[0];
+  const labelPill = cells[6].children[0];
   assert.match(labelPill.className, /lbl-unknown/);
 });
 
@@ -307,7 +307,7 @@ test("sliceRow maps an unknown label to the lbl-unknown fallback class", () => {
 test("rootGroupSection renders the raw root key as text only, never as markup", () => {
   const hostile = '<img src=x onerror=alert(1)>';
   const sec = mod.rootGroupSection({ root: hostile, runs: [] });
-  const h3 = elementsOf(sec).find((n) => n.tagName === "H3");
+  const h3 = sec.children.find((n) => n.tagName === "H3");
   assert.ok(h3, "section has an <h3> for the root label");
   // POSITIVE: the raw string is present verbatim as text.
   assert.equal(h3.textContent, hostile);
