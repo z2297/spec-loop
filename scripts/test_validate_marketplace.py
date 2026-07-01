@@ -832,6 +832,57 @@ class PluginManifestTest(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# Skills- and agents-loop frontmatter skip-branches (slice s8)
+#
+# validate_frontmatter_files runs three sibling loops (skills/*/SKILL.md,
+# commands/*.md, agents/*.md); each skips a file whose frontmatter cannot be
+# read (`if fm is None: continue`). The existing tests only drive the COMMAND
+# loop's continue; these pin the SKILL loop (validate_marketplace.py L182) and
+# the AGENT loop (L202). read_frontmatter records an error and returns None for
+# a missing/unterminated block, so validation must still FAIL and name the file
+# -- and must not crash by running the post-continue checks on a None fm.
+# --------------------------------------------------------------------------
+
+class FrontmatterSkipBranchTest(unittest.TestCase):
+    def test_skill_missing_frontmatter_block_fails_and_skips(self):
+        # A SKILL.md with no leading '---' -> read_frontmatter returns None ->
+        # the skills loop's `continue` fires (L182), skipping the name/dir check.
+        ok, errors = run_on_frontmatter(
+            "skill", "# Just a heading, no frontmatter\n"
+        )
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("missing YAML frontmatter" in e and "SKILL.md" in e
+                for e in errors),
+            f"missing skill frontmatter must be reported; got: {errors}",
+        )
+        # the post-continue name/dir-mismatch check must NOT have run on None fm
+        self.assertFalse(
+            any("does not match its directory" in e for e in errors),
+            f"skip must bypass the name/dir check; got: {errors}",
+        )
+
+    def test_agent_unterminated_frontmatter_block_fails_and_skips(self):
+        # An agent .md with a leading '---' but no closing fence ->
+        # read_frontmatter returns None -> the agents loop's `continue` fires
+        # (L202), skipping require_keys.
+        ok, errors = run_on_frontmatter(
+            "agent", "---\nname: theagent\n(no closing fence)\n"
+        )
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("unterminated frontmatter block" in e and "theagent.md" in e
+                for e in errors),
+            f"unterminated agent frontmatter must be reported; got: {errors}",
+        )
+        # the post-continue require_keys check must NOT have run on None fm
+        self.assertFalse(
+            any("missing required" in e for e in errors),
+            f"skip must bypass require_keys; got: {errors}",
+        )
+
+
+# --------------------------------------------------------------------------
 # Regression: the real repository still validates cleanly
 # --------------------------------------------------------------------------
 
