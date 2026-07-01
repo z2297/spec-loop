@@ -291,8 +291,9 @@ class Validator:
                 self.err(f"{self._rel(path)}: frontmatter missing required '{key}'")
 
 
-def main() -> int:
-    root = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    root = Path(argv[0] if argv else ".").resolve()
     if not root.is_dir():
         print(f"error: not a directory: {root}", file=sys.stderr)
         return 1

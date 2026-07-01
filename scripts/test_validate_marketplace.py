@@ -16,8 +16,12 @@ Usage:
     python3 scripts/test_validate_marketplace.py
 """
 
+import contextlib
+import io
 import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -148,6 +152,56 @@ def skill_fm(description_line: str) -> str:
     """A SKILL.md (requires name matching its dir 'theskill' + description) with a
     verbatim description line."""
     return "---\nname: theskill\n" + description_line + "\n---\n\n# A skill\n"
+
+
+# --------------------------------------------------------------------------
+# Marketplace/plugin structural fixtures (for the error-path coverage added by
+# slice s3). These generalize write_plugin to let a test supply arbitrary
+# marketplace.json / plugin.json content and choose whether to lay down the
+# plugin directory at all, so every validation-failure arm can be driven from a
+# real input rather than by calling an internal method. Everything is written
+# under a caller-provided TemporaryDirectory root; nothing touches the checkout.
+# --------------------------------------------------------------------------
+
+def run_on_root(build) -> tuple:
+    """Run the validator against a fresh tmp root that `build(root)` populates.
+    Returns (ok, errors). The root is asserted to live under the system temp dir
+    so a mis-authored fixture fails loudly instead of mutating the live checkout."""
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        assert str(root).startswith(tempfile.gettempdir()), (
+            f"fixture root {root} escaped the temp dir"
+        )
+        build(root)
+        v = vm.Validator(root)
+        return v.run(), v.errors
+
+
+def write_marketplace(root: Path, marketplace) -> None:
+    """Write .claude-plugin/marketplace.json. `marketplace` may be a dict (dumped
+    as JSON) or a raw str (written verbatim, e.g. to plant malformed JSON)."""
+    (root / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    body = marketplace if isinstance(marketplace, str) else json.dumps(marketplace)
+    (root / ".claude-plugin" / "marketplace.json").write_text(body + "\n")
+
+
+def write_plugin_dir(root: Path, source: str, plugin_json) -> Path:
+    """Lay down a plugin directory at `root/source` carrying plugin.json.
+    `plugin_json` may be a dict (dumped) or a raw str (verbatim, for malformed
+    JSON). Returns the plugin directory path."""
+    plugin_dir = root / source
+    (plugin_dir / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    body = plugin_json if isinstance(plugin_json, str) else json.dumps(plugin_json)
+    (plugin_dir / ".claude-plugin" / "plugin.json").write_text(body + "\n")
+    return plugin_dir
+
+
+def single_entry_marketplace(entry, *, metadata=None) -> dict:
+    """A minimal valid marketplace shell carrying exactly one plugins[] entry."""
+    m = {"name": "demo-market", "owner": {"name": "tester"}, "plugins": [entry]}
+    if metadata is not None:
+        m["metadata"] = metadata
+    return m
 
 
 # --------------------------------------------------------------------------
@@ -332,6 +386,436 @@ class FrontmatterColonSpaceTest(unittest.TestCase):
         self.assertIsInstance(bad, str)
         self.assertIn("description", bad)
         self.assertIn("': '", bad)
+
+
+# --------------------------------------------------------------------------
+# main() CLI: exit codes and reported output (slice s3)
+#
+# main(argv=None) resolves argv[0] (or "." when empty) and returns 0 on a valid
+# marketplace, 1 on a bad path or any validation error, printing OK:/FAILED:/error
+# accordingly. These pin the observable CLI contract without spawning a process or
+# mutating sys.argv; the default-arg case runs against an isolated tmp cwd, never
+# the live checkout.
+# --------------------------------------------------------------------------
+
+class MainCliTest(unittest.TestCase):
+    def _run_main(self, argv):
+        """Call vm.main(argv), capturing (rc, stdout, stderr)."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = vm.main(argv)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_not_a_directory_arg_exits_1(self):
+        with TemporaryDirectory() as td:
+            missing = str(Path(td) / "does-not-exist")
+            rc, out, err = self._run_main([missing])
+        self.assertEqual(rc, 1)
+        self.assertIn("error: not a directory", err)
+
+    def test_valid_repo_exits_0_and_prints_ok(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            write_plugin(root, cmd(
+                description="A read-only inspector.",
+                allowed_tools=["Read"],
+            ))
+            rc, out, err = self._run_main([str(root)])
+        self.assertEqual(rc, 0, f"valid repo must exit 0; stderr: {err}")
+        self.assertIn("OK:", out)
+
+    def test_invalid_repo_exits_1_and_prints_failed_with_errors(self):
+        # A root with no marketplace.json fails; FAILED: header + the error list
+        # must reach stderr.
+        with TemporaryDirectory() as td:
+            rc, out, err = self._run_main([str(Path(td))])
+        self.assertEqual(rc, 1)
+        self.assertIn("FAILED:", err)
+        self.assertIn("missing required file", err)
+
+    def test_default_arg_runs_against_cwd_without_raising(self):
+        # argv=[] resolves to "." (the process cwd). Guardian/historian INVARIANT:
+        # this must NOT run against the live checkout, and its exit code is
+        # environment-dependent, so assert only that it returns an int and does not
+        # raise. chdir into an isolated tmp dir, restored via addCleanup.
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)
+        td = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(td, ignore_errors=True))
+        os.chdir(td)
+        rc, out, err = self._run_main([])
+        self.assertIsInstance(rc, int)
+
+
+# --------------------------------------------------------------------------
+# Marketplace-level structural failures (slice s3)
+# --------------------------------------------------------------------------
+
+class MarketplaceStructureTest(unittest.TestCase):
+    def test_missing_marketplace_json_reported(self):
+        ok, errors = run_on_root(lambda root: None)  # empty root, no manifest
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("missing required file" in e and "marketplace.json" in e
+                for e in errors),
+            f"missing marketplace.json must be reported; got: {errors}",
+        )
+
+    def test_invalid_json_marketplace_reported(self):
+        ok, errors = run_on_root(
+            lambda root: write_marketplace(root, "{ not valid json")
+        )
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("invalid JSON" in e and "marketplace.json" in e for e in errors),
+            f"malformed marketplace.json must be reported; got: {errors}",
+        )
+
+    def test_non_kebab_marketplace_name_fails(self):
+        ok, errors = run_on_root(lambda root: write_marketplace(root, {
+            "name": "Not Kebab",
+            "owner": {"name": "tester"},
+            "plugins": [{"name": "demo", "source": "./plugins/demo"}],
+        }))
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("'name' must be a kebab-case string" in e for e in errors),
+            f"non-kebab marketplace name must fail; got: {errors}",
+        )
+
+    def test_missing_owner_name_fails(self):
+        ok, errors = run_on_root(lambda root: write_marketplace(root, {
+            "name": "demo-market",
+            "owner": {},
+            "plugins": [{"name": "demo", "source": "./plugins/demo"}],
+        }))
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("'owner.name' is required" in e for e in errors),
+            f"missing owner.name must fail; got: {errors}",
+        )
+
+    def test_empty_plugins_array_fails(self):
+        ok, errors = run_on_root(lambda root: write_marketplace(root, {
+            "name": "demo-market",
+            "owner": {"name": "tester"},
+            "plugins": [],
+        }))
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("'plugins' must be a non-empty array" in e for e in errors),
+            f"empty plugins array must fail; got: {errors}",
+        )
+
+    def test_plugins_not_a_list_fails(self):
+        ok, errors = run_on_root(lambda root: write_marketplace(root, {
+            "name": "demo-market",
+            "owner": {"name": "tester"},
+            "plugins": "not-a-list",
+        }))
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("'plugins' must be a non-empty array" in e for e in errors),
+            f"non-list plugins must fail; got: {errors}",
+        )
+
+    def test_plugin_root_prefixing_resolves_bare_name_source(self):
+        # A BARE-name source (no './' prefix) must be resolved under
+        # metadata.pluginRoot. Lay the plugin down there and confirm it passes.
+        def build(root):
+            write_plugin_dir(root, "plugins/demo", {"name": "demo", "version": "0.0.1"})
+            write_marketplace(root, single_entry_marketplace(
+                {"name": "demo", "source": "demo"},
+                metadata={"pluginRoot": "plugins"},
+            ))
+        ok, errors = run_on_root(build)
+        self.assertTrue(
+            ok, f"bare-name source under pluginRoot must resolve; got: {errors}"
+        )
+
+
+# --------------------------------------------------------------------------
+# Plugin-entry structural failures (slice s3)
+# --------------------------------------------------------------------------
+
+class PluginEntryTest(unittest.TestCase):
+    def test_entry_not_an_object_fails(self):
+        ok, errors = run_on_root(lambda root: write_marketplace(root, {
+            "name": "demo-market",
+            "owner": {"name": "tester"},
+            "plugins": ["not-an-object"],
+        }))
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("must be an object" in e for e in errors),
+            f"non-object entry must fail; got: {errors}",
+        )
+
+    def test_non_kebab_entry_name_fails(self):
+        ok, errors = run_on_root(lambda root: write_marketplace(
+            root, single_entry_marketplace({"name": "Bad Name", "source": "./x"})
+        ))
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("'name' must be a kebab-case string" in e for e in errors),
+            f"non-kebab entry name must fail; got: {errors}",
+        )
+
+    def test_duplicate_plugin_name_fails(self):
+        ok, errors = run_on_root(lambda root: write_marketplace(root, {
+            "name": "demo-market",
+            "owner": {"name": "tester"},
+            "plugins": [
+                {"name": "demo", "source": "./plugins/demo"},
+                {"name": "demo", "source": "./plugins/other"},
+            ],
+        }))
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("duplicate plugin name" in e for e in errors),
+            f"duplicate plugin name must fail; got: {errors}",
+        )
+
+    def test_missing_string_source_fails(self):
+        ok, errors = run_on_root(lambda root: write_marketplace(
+            root, single_entry_marketplace({"name": "demo"})  # no source
+        ))
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("'source' (relative path) is required" in e for e in errors),
+            f"missing string source must fail; got: {errors}",
+        )
+
+    def test_source_path_traversal_fails(self):
+        ok, errors = run_on_root(lambda root: write_marketplace(
+            root, single_entry_marketplace({"name": "demo", "source": "../escape"})
+        ))
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("path traversal" in e for e in errors),
+            f"'..' in source must fail; got: {errors}",
+        )
+
+    def test_source_not_a_directory_fails(self):
+        ok, errors = run_on_root(lambda root: write_marketplace(
+            root, single_entry_marketplace(
+                {"name": "demo", "source": "./nonexistent"}
+            )
+        ))
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("does not resolve to a directory" in e for e in errors),
+            f"non-directory source must fail; got: {errors}",
+        )
+
+    def test_missing_plugin_json_fails(self):
+        def build(root):
+            (root / "plugins" / "demo").mkdir(parents=True)  # dir but no plugin.json
+            write_marketplace(root, single_entry_marketplace(
+                {"name": "demo", "source": "./plugins/demo"}
+            ))
+        ok, errors = run_on_root(build)
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("missing" in e and "plugin.json" in e for e in errors),
+            f"missing plugin.json must fail; got: {errors}",
+        )
+
+
+# --------------------------------------------------------------------------
+# Object-source validation (slice s3)
+# --------------------------------------------------------------------------
+
+class SourceObjectTest(unittest.TestCase):
+    def _run_source(self, source_obj):
+        return run_on_root(lambda root: write_marketplace(
+            root, single_entry_marketplace({"name": "demo", "source": source_obj})
+        ))
+
+    def test_unknown_source_kind_fails(self):
+        ok, errors = self._run_source({"source": "svn", "repo": "x"})
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("must be one of" in e for e in errors),
+            f"unknown source kind must fail; got: {errors}",
+        )
+
+    def test_missing_required_key_fails(self):
+        ok, errors = self._run_source({"source": "github"})  # github requires 'repo'
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("github source requires string 'repo'" in e for e in errors),
+            f"github without repo must fail; got: {errors}",
+        )
+
+    def test_empty_ref_fails(self):
+        ok, errors = self._run_source(
+            {"source": "github", "repo": "o/r", "ref": ""}
+        )
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("'source.ref' must be a non-empty string" in e for e in errors),
+            f"empty ref must fail; got: {errors}",
+        )
+
+    def test_bad_sha_fails(self):
+        ok, errors = self._run_source(
+            {"source": "github", "repo": "o/r", "sha": "deadbeef"}  # not 40 hex
+        )
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("must be a 40-char commit SHA" in e for e in errors),
+            f"non-40-char sha must fail; got: {errors}",
+        )
+
+    def test_valid_object_source_passes(self):
+        ok, errors = self._run_source({
+            "source": "github",
+            "repo": "owner/repo",
+            "ref": "main",
+            "sha": "a" * 40,
+        })
+        self.assertTrue(
+            ok, f"a well-formed github object source must pass; got: {errors}"
+        )
+
+
+# --------------------------------------------------------------------------
+# Plugin manifest + frontmatter failures (slice s3)
+# --------------------------------------------------------------------------
+
+class PluginManifestTest(unittest.TestCase):
+    def _run_with_manifest(self, manifest, *, entry_extra=None):
+        entry = {"name": "demo", "source": "./plugins/demo"}
+        if entry_extra:
+            entry.update(entry_extra)
+
+        def build(root):
+            write_plugin_dir(root, "plugins/demo", manifest)
+            write_marketplace(root, single_entry_marketplace(entry))
+        return run_on_root(build)
+
+    def test_manifest_name_non_kebab_fails(self):
+        ok, errors = self._run_with_manifest({"name": "Bad Name", "version": "0.0.1"})
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("'name' must be a kebab-case string" in e for e in errors),
+            f"non-kebab manifest name must fail; got: {errors}",
+        )
+
+    def test_manifest_name_mismatch_fails(self):
+        ok, errors = self._run_with_manifest({"name": "other", "version": "0.0.1"})
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("does not match marketplace entry" in e for e in errors),
+            f"manifest/entry name mismatch must fail; got: {errors}",
+        )
+
+    def test_version_mismatch_fails(self):
+        ok, errors = self._run_with_manifest(
+            {"name": "demo", "version": "9.9.9"},
+            entry_extra={"version": "0.0.1"},
+        )
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("version mismatch" in e for e in errors),
+            f"version mismatch must fail; got: {errors}",
+        )
+
+    def test_malformed_plugin_json_reported(self):
+        # A plugin.json that is present but not valid JSON: load_json records an
+        # 'invalid JSON' error and returns None, so validate_plugin bails early.
+        ok, errors = self._run_with_manifest("{ not valid json")
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("invalid JSON" in e and "plugin.json" in e for e in errors),
+            f"malformed plugin.json must be reported; got: {errors}",
+        )
+
+    def test_command_without_allowed_tools_passes(self):
+        # A read-only command whose frontmatter OMITS allowed-tools entirely must
+        # pass: _allowed_tools returns an empty set for a missing/non-string value,
+        # so there is no Edit to flag.
+        command_md = (
+            "---\n"
+            'description: "A read-only inspector that mutates nothing."\n'
+            "---\n\n# A command\n"
+        )
+
+        def build(root):
+            plugin_dir = write_plugin_dir(
+                root, "plugins/demo", {"name": "demo", "version": "0.0.1"}
+            )
+            (plugin_dir / "commands").mkdir()
+            (plugin_dir / "commands" / "thecmd.md").write_text(command_md)
+            write_marketplace(root, single_entry_marketplace(
+                {"name": "demo", "source": "./plugins/demo"}
+            ))
+        ok, errors = run_on_root(build)
+        self.assertTrue(
+            ok,
+            f"a read-only command with no allowed-tools must pass; got: {errors}",
+        )
+
+    def test_skill_name_dir_mismatch_fails(self):
+        # SKILL.md declaring a name that differs from its directory must fail.
+        skill_md = (
+            "---\nname: wrongname\n"
+            'description: "A skill."\n---\n\n# A skill\n'
+        )
+
+        def build(root):
+            plugin_dir = write_plugin_dir(
+                root, "plugins/demo", {"name": "demo", "version": "0.0.1"}
+            )
+            skill_dir = plugin_dir / "skills" / "theskill"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(skill_md)
+            write_marketplace(root, single_entry_marketplace(
+                {"name": "demo", "source": "./plugins/demo"}
+            ))
+        ok, errors = run_on_root(build)
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("does not match its directory" in e for e in errors),
+            f"skill name/dir mismatch must fail; got: {errors}",
+        )
+
+    def test_agent_missing_required_key_fails(self):
+        # An agent frontmatter missing 'name' must be reported by require_keys.
+        ok, errors = run_on_frontmatter(
+            "agent", "---\ndescription: \"An agent.\"\n---\n\n# An agent\n"
+        )
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("missing required 'name'" in e and "theagent.md" in e
+                for e in errors),
+            f"agent missing name must fail; got: {errors}",
+        )
+
+    def test_missing_frontmatter_block_fails(self):
+        # A command file with no leading '---' block.
+        ok, errors = run_on_frontmatter(
+            "command", "# Just a heading, no frontmatter\n"
+        )
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("missing YAML frontmatter" in e and "thecmd.md" in e
+                for e in errors),
+            f"missing frontmatter block must fail; got: {errors}",
+        )
+
+    def test_unterminated_frontmatter_block_fails(self):
+        # A leading '---' with no closing '---'.
+        ok, errors = run_on_frontmatter(
+            "command", "---\ndescription: \"x\"\n(no closing fence)\n"
+        )
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("unterminated frontmatter block" in e and "thecmd.md" in e
+                for e in errors),
+            f"unterminated frontmatter must fail; got: {errors}",
+        )
 
 
 # --------------------------------------------------------------------------
