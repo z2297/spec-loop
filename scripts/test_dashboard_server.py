@@ -396,5 +396,303 @@ class HttpServerTests(unittest.TestCase):
         self.assertEqual(body, b"")
 
 
+# --------------------------------------------------------------------------
+# Part A — bind host / advertised-port decoupling (security: anti-rebinding)
+# --------------------------------------------------------------------------
+
+class BindHostAllowlistTests(unittest.TestCase):
+    """The Host-header allowlist must derive from the ADVERTISED port and stay
+    hardcoded to loopback host strings — binding 0.0.0.0 must NEVER widen it."""
+
+    def test_allowlist_derives_from_advertised_port_only(self):
+        # advertised port differs from bound port -> allowlist keys off advertised.
+        allowed = ds._host_allowlist(9999)
+        self.assertEqual(allowed, {"127.0.0.1:9999", "localhost:9999"})
+
+    def test_allowlist_never_contains_bind_host_zero(self):
+        # No entry may ever reference 0.0.0.0, regardless of bind host.
+        for port in (0, 8787, 9999):
+            allowed = ds._host_allowlist(port)
+            self.assertFalse(any("0.0.0.0" in h for h in allowed),
+                             f"allowlist leaked 0.0.0.0: {allowed}")
+
+    def test_build_server_binds_configured_host(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            server = ds.build_server(Path(d), port=0,
+                                     net=ds.NetworkConfig(bind_host="0.0.0.0"))
+            try:
+                # Bound host reflects the request; allowlist stays loopback-only.
+                self.assertEqual(server.server_address[0], "0.0.0.0")
+                handler = server.RequestHandlerClass
+                self.assertFalse(any("0.0.0.0" in h for h in handler.allowed_hosts))
+            finally:
+                server.server_close()
+
+    def test_foreign_and_star_host_421_when_bound_zero(self):
+        # The load-bearing anti-DNS-rebinding assertion: binding 0.0.0.0 does not
+        # relax the Host allowlist. We connect over loopback (reachable) but forge
+        # the Host header.
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            docs = Path(d) / "docs" / "spec-loop"
+            write_dag(docs / "r", [slice_obj("s1", status="pending")])
+            assets = Path(d) / "assets"
+            assets.mkdir()
+            (assets / "index.html").write_text("<!doctype html>")
+            server = ds.build_server(Path(d), assets_dir=assets, port=0,
+                                     net=ds.NetworkConfig(bind_host="0.0.0.0"))
+            port = server.server_address[1]
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                for bad_host in ("evil.com", "*", f"0.0.0.0:{port}",
+                                 f"container-host:{port}"):
+                    status = self._request_host(port, bad_host)
+                    self.assertEqual(status, 421, f"{bad_host!r} -> {status}")
+                # ...but the advertised loopback Host still works.
+                self.assertEqual(self._request_host(port, f"127.0.0.1:{port}"), 200)
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_advertise_port_overrides_bound_port_in_allowlist(self):
+        # When advertise_port is set, the allowlist uses it, not the bound port,
+        # so a Host on the ADVERTISED port is accepted even though the socket is
+        # bound to a different (ephemeral) port. We reach the socket over its real
+        # bound port but forge the advertised Host.
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            docs = Path(d) / "docs" / "spec-loop"
+            write_dag(docs / "r", [slice_obj("s1", status="pending")])
+            server = ds.build_server(
+                Path(d), port=0,
+                net=ds.NetworkConfig(bind_host="0.0.0.0", advertise_port=8080))
+            port = server.server_address[1]
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                # Host on the ADVERTISED port -> accepted.
+                self.assertEqual(self._request_host(port, "127.0.0.1:8080"), 200)
+                # Host on the (real) bound port -> NOT in allowlist -> 421.
+                self.assertEqual(self._request_host(port, f"127.0.0.1:{port}"), 421)
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_advertise_port_zero_falls_back_to_bound_port(self):
+        # An explicit advertise_port=0 is falsy and must degrade to the real bound
+        # port (a reachable loopback allowlist), never an unreachable ":0" entry.
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            docs = Path(d) / "docs" / "spec-loop"
+            write_dag(docs / "r", [slice_obj("s1", status="pending")])
+            server = ds.build_server(Path(d), port=0,
+                                     net=ds.NetworkConfig(advertise_port=0))
+            port = server.server_address[1]
+            handler = server.RequestHandlerClass
+            self.assertNotIn("127.0.0.1:0", handler.allowed_hosts)
+            self.assertIn(f"127.0.0.1:{port}", handler.allowed_hosts)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                self.assertEqual(self._request_host(port, f"127.0.0.1:{port}"), 200)
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    @staticmethod
+    def _request_host(port, host):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.putrequest("GET", "/api/runs", skip_host=True,
+                        skip_accept_encoding=True)
+        conn.putheader("Host", host)
+        conn.endheaders()
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+        return resp.status
+
+
+# --------------------------------------------------------------------------
+# Part B — multi-root aggregation, namespacing, per-root containment
+# --------------------------------------------------------------------------
+
+class MultiRootTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self.tmpdir.name)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _root(self, name):
+        """Create a repo root <tmp>/<name> with a docs/spec-loop dir."""
+        root = self.tmp / name
+        (root / "docs" / "spec-loop").mkdir(parents=True)
+        return root
+
+    def test_single_root_is_transparent_no_namespacing(self):
+        # scan_all_roots with exactly one root -> bare run_id, no 'root' field.
+        root = self._root("repo")
+        write_dag(root / "docs" / "spec-loop" / "run-x",
+                  [slice_obj("s1", status="pending")])
+        runs = ds.scan_all_roots([str(root)])
+        self.assertEqual([r["run_id"] for r in runs], ["run-x"])
+        self.assertNotIn("root", runs[0])
+
+    def test_multi_root_namespaces_run_ids_no_collision(self):
+        # Two roots each with an identically-named run -> two distinct ids.
+        a = self._root("repo-a")
+        b = self._root("repo-b")
+        write_dag(a / "docs" / "spec-loop" / "run-x",
+                  [slice_obj("s1", status="pending")])
+        write_dag(b / "docs" / "spec-loop" / "run-x",
+                  [slice_obj("s1", status="pending")])
+        runs = ds.scan_all_roots([str(a), str(b)])
+        ids = sorted(r["run_id"] for r in runs)
+        self.assertEqual(ids, ["repo-a:run-x", "repo-b:run-x"])
+        # Every run carries its owning root key.
+        self.assertTrue(all("root" in r for r in runs))
+
+    def test_multi_root_ordering_is_deterministic_and_stable(self):
+        # Colliding basenames get a deterministic, stable de-dup — same input
+        # order -> same namespaced ids across repeated calls.
+        outer1 = self.tmp / "x" / "repo"
+        outer2 = self.tmp / "y" / "repo"
+        for r in (outer1, outer2):
+            (r / "docs" / "spec-loop").mkdir(parents=True)
+            write_dag(r / "docs" / "spec-loop" / "run-x",
+                      [slice_obj("s1", status="pending")])
+        first = sorted(r["run_id"] for r in
+                       ds.scan_all_roots([str(outer1), str(outer2)]))
+        second = sorted(r["run_id"] for r in
+                        ds.scan_all_roots([str(outer1), str(outer2)]))
+        self.assertEqual(first, second)
+        # Colliding basenames must still yield two distinct ids.
+        self.assertEqual(len(set(first)), 2)
+
+    def test_colliding_basenames_get_concrete_disjoint_suffixes(self):
+        # Guard the de-dup SCHEME, not just its count: the two colliding "repo"
+        # roots must map to concrete, disjoint namespaced ids in input order.
+        outer1 = self.tmp / "x" / "repo"
+        outer2 = self.tmp / "y" / "repo"
+        for r in (outer1, outer2):
+            (r / "docs" / "spec-loop").mkdir(parents=True)
+            write_dag(r / "docs" / "spec-loop" / "run-x",
+                      [slice_obj("s1", status="pending")])
+        ids = sorted(r["run_id"] for r in
+                     ds.scan_all_roots([str(outer1), str(outer2)]))
+        self.assertEqual(ids, ["repo#1:run-x", "repo#2:run-x"])
+
+    def test_single_root_run_id_with_colon_resolves_transparently(self):
+        # A single-root run whose basename literally contains ':' must NOT be
+        # split/namespaced — the empty-key branch resolves it as-is.
+        root = self._root("repo")
+        write_dag(root / "docs" / "spec-loop" / "a:b",
+                  [slice_obj("s1", status="pending")])
+        runs = ds.scan_all_roots([str(root)])
+        self.assertEqual([r["run_id"] for r in runs], ["a:b"])
+        self.assertNotIn("root", runs[0])
+
+
+class MultiRootHttpTests(unittest.TestCase):
+    """Per-root containment over a real socket — a namespaced id may never reach
+    a sibling root, and crafted ids return a uniform no-oracle 404."""
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        cls.tmpdir = tempfile.TemporaryDirectory()
+        cls.tmp = Path(cls.tmpdir.name)
+        cls.root_a = cls.tmp / "repo-a"
+        cls.root_b = cls.tmp / "repo-b"
+        for root, only_run in ((cls.root_a, "only-a"), (cls.root_b, "only-b")):
+            (root / "docs" / "spec-loop").mkdir(parents=True)
+            write_dag(root / "docs" / "spec-loop" / only_run,
+                      [slice_obj("s1", status="complete")])
+        # A secret file under root A, outside its docs/spec-loop, to prove no escape.
+        (cls.root_a / "SECRET.txt").write_text("TOP SECRET A")
+        assets = cls.tmp / "assets"
+        assets.mkdir()
+        (assets / "index.html").write_text("<!doctype html>")
+        cls.server = ds.build_server([str(cls.root_a), str(cls.root_b)],
+                                     assets_dir=assets, port=0)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmpdir.cleanup()
+
+    def _get(self, path):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.putrequest("GET", path, skip_accept_encoding=True)
+        conn.putheader("Host", f"127.0.0.1:{self.port}")
+        conn.endheaders()
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        return resp.status, body
+
+    def test_api_runs_aggregates_both_roots_namespaced(self):
+        status, body = self._get("/api/runs")
+        self.assertEqual(status, 200)
+        ids = {r["run_id"] for r in json.loads(body)["runs"]}
+        self.assertEqual(ids, {"repo-a:only-a", "repo-b:only-b"})
+
+    def test_namespaced_detail_resolves_to_owning_root(self):
+        status, body = self._get("/api/runs/repo-a%3Aonly-a")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["run_id"], "repo-a:only-a")
+
+    def test_run_from_one_root_not_reachable_under_another(self):
+        # 'only-b' exists only in root B; asking for it namespaced to root A misses.
+        status, _ = self._get("/api/runs/repo-a%3Aonly-b")
+        self.assertEqual(status, 404)
+
+    def test_bogus_root_key_and_bare_id_miss_uniformly(self):
+        # A syntactically valid but unknown key, and a bare (unqualified) id, must
+        # both return the SAME no-oracle 404 body as a matched-key missing run —
+        # never a fall-back that searches all roots.
+        _, plain_miss = self._get("/api/runs/repo-a%3Adoes-not-exist")
+        for path in ("/api/runs/nosuchrepo%3Aonly-a",  # unknown key
+                     "/api/runs/only-a",               # bare id, no key
+                     "/api/runs/%3Aonly-a"):           # empty key
+            status, body = self._get(path)
+            self.assertEqual(status, 404, f"{path} -> {status}")
+            self.assertEqual(body, plain_miss, f"path oracle on {path}")
+
+    def test_crafted_namespaced_id_cannot_escape_or_oracle(self):
+        # Uniform no-path-oracle 404: a crafted traversal id and a plain miss must
+        # be byte-identical, and neither leaks the sibling root or a secret.
+        _, plain_miss = self._get("/api/runs/repo-a%3Adoes-not-exist")
+        crafted = (
+            "/api/runs/repo-a%3A..%2f..%2frepo-b%2fdocs%2fspec-loop%2fonly-b",
+            "/api/runs/repo-a%3A..%2f..%2fSECRET.txt",
+            "/api/runs/..%2f..%2frepo-b%2fdocs%2fspec-loop%2fonly-b",
+        )
+        for path in crafted:
+            status, body = self._get(path)
+            self.assertEqual(status, 404, f"{path} -> {status}")
+            self.assertEqual(body, plain_miss, f"path oracle on {path}")
+            self.assertNotIn(b"SECRET", body)
+
+    def test_multi_root_foreign_host_still_421(self):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.putrequest("GET", "/api/runs", skip_host=True,
+                        skip_accept_encoding=True)
+        conn.putheader("Host", "evil.com")
+        conn.endheaders()
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+        self.assertEqual(resp.status, 421)
+
+
 if __name__ == "__main__":
     unittest.main()
