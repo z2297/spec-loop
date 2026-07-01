@@ -29,7 +29,18 @@ jobs:
           node-version: "20"
 
       - name: Client JS test suite (Node built-ins)
-        run: node --test --experimental-test-coverage scripts/dashboard_assets/index.test.mjs
+        # Fail closed on an emptied/truncated suite: `node --test` exits 0 when a
+        # file registers zero tests, so also assert a minimum count (mirrors the
+        # Python lane's MIN_TESTS guard in measure_coverage.py). A JS coverage
+        # NUMBER gate is deferred to s7 — Node 20 has no per-metric threshold flags.
+        run: |
+          set -o pipefail
+          out=$(node --test --experimental-test-coverage scripts/dashboard_assets/index.test.mjs 2>&1)
+          echo "$out"
+          ran=$(printf '%s\n' "$out" | sed -n 's/^# tests \([0-9][0-9]*\).*/\1/p')
+          if [ "${ran:-0}" -lt 12 ]; then
+            echo "FAIL: only ${ran:-0} client JS tests ran (expected >= 12)"; exit 1
+          fi
 
       - name: Install Claude Code CLI
         run: npm install -g @anthropic-ai/claude-code

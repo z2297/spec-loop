@@ -40,28 +40,43 @@ const EXPORTS = [
   "el", "overviewCard", "rootGroupSection", "sliceRow", "__setDocument",
 ];
 
-// ---- load the inline client script as a real, coverage-instrumented module ----
-function loadClientModule() {
+// Extract the inline <script> body and rewrite it into an importable ES module:
+// strip the browser-inert UMD /* test-export */ tail and append an equivalent ESM
+// `export { ... }`. Also asserts the page's export tail lists EXACTLY the EXPORTS
+// surface (bidirectional — neither the page nor the harness may drift silently).
+function extractClientSource() {
   const html = readFileSync(HTML_PATH, "utf8");
-  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
+  const scripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)];
   assert.equal(scripts.length, 1, "expected exactly one inline <script> in index.html");
   let body = scripts[0][1];
 
-  // The browser-inert UMD export tail must be present, and must list exactly EXPORTS.
   const tail = body.match(/\/\* test-export \*\/[\s\S]*$/);
   assert.ok(tail, "index.html is missing the /* test-export */ tail");
-  const listed = [...tail[0].matchAll(/\b([A-Za-z_$][\w$]*)\b/g)].map((m) => m[1]);
-  for (const name of EXPORTS) {
-    assert.ok(listed.includes(name), `page export tail is missing ${name}`);
-  }
+  // Compare only the identifiers inside the `module.exports = { ... }` object
+  // literal against EXPORTS, as exact sets — this catches drift in BOTH directions
+  // (a name added to the page but not here, or removed from the page but still here).
+  const objMatch = tail[0].match(/module\.exports\s*=\s*\{([\s\S]*?)\}/);
+  assert.ok(objMatch, "test-export tail must assign a module.exports object literal");
+  const listed = [...objMatch[1].matchAll(/\b([A-Za-z_$][\w$]*)\b/g)].map((m) => m[1]);
+  assert.deepEqual(
+    [...new Set(listed)].sort(),
+    [...EXPORTS].sort(),
+    "page /* test-export */ tail must list exactly the EXPORTS surface",
+  );
 
-  // Strip the CJS tail, append an ESM export of the same surface, import as a
-  // real module so V8 records coverage against it.
   body = body.replace(/\/\* test-export \*\/[\s\S]*$/, "");
   body += `\nexport { ${EXPORTS.join(", ")} };\n`;
+  return body;
+}
+
+// Write the rewritten source to a fresh temp .mjs and import it as a REAL module
+// so `node --test --experimental-test-coverage` attributes coverage to it (a
+// node:vm-evaluated string gets no coverage). A unique temp dir per call yields a
+// distinct module URL, so callers can import a fresh (un-cached) copy on demand.
+function loadClientModule(source) {
   const dir = mkdtempSync(join(tmpdir(), "dashboard-client-"));
   const modPath = join(dir, "index.client.mjs");
-  writeFileSync(modPath, body, "utf8");
+  writeFileSync(modPath, source, "utf8");
   return import(pathToFileURL(modPath).href);
 }
 
@@ -101,7 +116,8 @@ function makeDom() {
   };
 }
 
-const mod = await loadClientModule();
+const CLIENT_SOURCE = extractClientSource();
+const mod = await loadClientModule(CLIENT_SOURCE);
 mod.__setDocument(makeDom());
 
 // small helpers to query the shim tree
@@ -114,15 +130,34 @@ test("module exposes exactly the expected function surface", () => {
   for (const name of EXPORTS) assert.equal(typeof mod[name], "function", `${name} is a function`);
 });
 
-test("importing under Node runs no bootstrap and adds no network verb", () => {
-  // No listeners/timers/fetch were armed: fetch is not defined in this process,
-  // and importing the module above did not throw (it would have on any
-  // location/document/window/fetch access). The read-only, no-new-fetch boundary
-  // holds — the harness references no network API at all.
-  assert.equal(typeof globalThis.fetch === "function" ? "present" : "absent",
-    typeof globalThis.fetch === "function" ? "present" : "absent");
-  // The dormant bootstrap is proven by the successful import + the pure calls below.
-  assert.ok(true);
+test("importing under Node arms no timer, registers no listener, and fires no fetch", async () => {
+  // The HAS_DOM guard must keep the whole bootstrap dormant on import. Prove it:
+  // install counting spies over the exact globals the bootstrap would touch
+  // (fetch is a real Node global, as are setInterval/setTimeout — the earlier
+  // "did not throw" reasoning was insufficient), then import a FRESH copy of the
+  // client module under them. A regression that dropped the HAS_DOM guard would
+  // fire fetch()/setInterval()/window.addEventListener and trip these counters.
+  const calls = { fetch: 0, setInterval: 0, setTimeout: 0, addEventListener: 0 };
+  const orig = {
+    fetch: globalThis.fetch,
+    setInterval: globalThis.setInterval,
+    setTimeout: globalThis.setTimeout,
+    window: globalThis.window,
+  };
+  globalThis.fetch = () => { calls.fetch++; return Promise.resolve(); };
+  globalThis.setInterval = () => { calls.setInterval++; return 0; };
+  globalThis.setTimeout = () => { calls.setTimeout++; return 0; };
+  globalThis.window = { addEventListener() { calls.addEventListener++; } };
+  try {
+    await loadClientModule(CLIENT_SOURCE);   // fresh temp module → real (re)evaluation
+  } finally {
+    globalThis.fetch = orig.fetch;
+    globalThis.setInterval = orig.setInterval;
+    globalThis.setTimeout = orig.setTimeout;
+    if (orig.window === undefined) delete globalThis.window;
+    else globalThis.window = orig.window;
+  }
+  assert.deepEqual(calls, { fetch: 0, setInterval: 0, setTimeout: 0, addEventListener: 0 });
 });
 
 // ---- 2. groupRunsByRoot (mirrors server single/multi-root grouping contract) ----
@@ -156,6 +191,23 @@ test("groupRunsByRoot: empty and null input yield a single empty group", () => {
   }
 });
 
+test("groupRunsByRoot: mixed keyed/unkeyed and non-string roots coerce to the empty group", () => {
+  // A run with no `root`, a null root, or a non-string root all fall into the ""
+  // group; a single keyed run flips multiRoot on. This is the boundary that
+  // decides how a partially-namespaced batch renders.
+  const runs = [
+    { run_id: "a" },                 // missing root -> ""
+    { run_id: "b", root: "repoX" },  // keyed
+    { run_id: "c", root: null },     // null -> ""
+    { run_id: "d", root: 7 },        // non-string -> ""
+  ];
+  const { multiRoot, groups } = mod.groupRunsByRoot(runs);
+  assert.equal(multiRoot, true);
+  assert.deepEqual(groups.map((g) => g.root), ["", "repoX"]);
+  assert.deepEqual(groups[0].runs.map((r) => r.run_id), ["a", "c", "d"]);
+  assert.deepEqual(groups[1].runs.map((r) => r.run_id), ["b"]);
+});
+
 // ---- 3. parseHashFrom namespaced-id round-trip (mirrors server colon round-trip) ----
 test("parseHashFrom: overview for empty/bare/non-run hashes", () => {
   for (const h of ["", "#", "#overview", "run/", "#run/"]) {
@@ -178,13 +230,28 @@ test("parseHashFrom: namespaced run-id survives the encode->parse round-trip", (
 });
 
 // ---- 4. render/DOM output via the shim ----
-test("sha7 and truncate edge cases", () => {
+test("sha7 and truncate edge cases (incl. exact-length boundaries)", () => {
   assert.equal(mod.sha7(null), "?");
+  assert.equal(mod.sha7(""), "");            // empty string is distinct from null
   assert.equal(mod.sha7("abc"), "abc");
+  assert.equal(mod.sha7("0123456"), "0123456");   // exactly 7 — unchanged
   assert.equal(mod.sha7("0123456789"), "0123456");
   assert.equal(mod.truncate(null, 5), "");
   assert.equal(mod.truncate("short", 10), "short");
+  assert.equal(mod.truncate("abcd", 4), "abcd");  // length === n — NOT truncated
   assert.equal(mod.truncate("0123456789", 4), "0123…");
+});
+
+test("labelClass allowlists via hasOwnProperty and rejects inherited/proto keys", () => {
+  // The hasOwnProperty guard is the load-bearing detail: a plain LABEL_CLASS[label]
+  // lookup would resolve "constructor"/"toString"/"__proto__" to inherited members
+  // and leak a garbage class. Assert those all fall back to lbl-unknown.
+  assert.equal(mod.labelClass("complete"), "lbl-complete");
+  assert.equal(mod.labelClass("split"), "lbl-split");
+  assert.equal(mod.labelClass("totally-unknown"), "lbl-unknown");
+  for (const proto of ["constructor", "toString", "hasOwnProperty", "__proto__", "valueOf"]) {
+    assert.equal(mod.labelClass(proto), "lbl-unknown", `${proto} must not resolve to an inherited member`);
+  }
 });
 
 test("overviewCard renders a .run card carrying run_id and base_ref@sha7", () => {
@@ -195,6 +262,14 @@ test("overviewCard renders a .run card carrying run_id and base_ref@sha7", () =>
   const text = card.textContent;
   assert.match(text, /run-42/);
   assert.match(text, /alpha@abcdef1/);   // base_ref@sha7 (first 7 of the sha)
+});
+
+test("overviewCard short-circuits to a transient placeholder for an unreadable run", () => {
+  const card = mod.overviewCard({ run_id: "mid-run", status: "unreadable" });
+  assert.match(card.className, /transient/);
+  assert.doesNotMatch(card.className, /\bclickable\b/);  // not a normal clickable run card
+  assert.match(card.textContent, /mid-run/);
+  assert.match(card.textContent, /in progress/);
 });
 
 test("sliceRow yields 7 cells with truncated goal and an allowlisted label class", () => {
@@ -208,7 +283,10 @@ test("sliceRow yields 7 cells with truncated goal and an allowlisted label class
   assert.equal(cells[0].textContent, "s1");
   assert.ok(cells[1].textContent.endsWith("…"), "long goal is truncated with an ellipsis");
   assert.ok(cells[1].textContent.length < longGoal.length);
+  assert.equal(cells[2].textContent, "2");   // risk_tier
+  assert.equal(cells[3].textContent, "0");   // depth
   assert.equal(cells[4].textContent, "—");   // null parent renders as em dash
+  assert.equal(cells[5].textContent, "s0");  // deps joined
   const labelPill = elementsOf(cells[6])[0];
   assert.match(labelPill.className, /lbl-complete/);
 });
@@ -219,6 +297,8 @@ test("sliceRow maps an unknown label to the lbl-unknown fallback class", () => {
     label: "some-bogus-label",
   });
   const cells = elementsOf(row);
+  assert.equal(cells[4].textContent, "s1");  // non-null parent shown verbatim
+  assert.equal(cells[5].textContent, "—");   // empty deps render as em dash
   const labelPill = elementsOf(cells[6])[0];
   assert.match(labelPill.className, /lbl-unknown/);
 });
