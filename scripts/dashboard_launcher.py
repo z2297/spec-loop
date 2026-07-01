@@ -217,8 +217,10 @@ def parse_running_names(stdout):
 
 
 def parse_all_names(stdout):
-    """Set of container names from ``docker ps -a --format {{.Names}}`` output."""
-    return {line.strip() for line in stdout.splitlines() if line.strip()}
+    """Set of container names from ``docker ps -a --format {{.Names}}`` output.
+
+    Same line-per-name format as ``docker ps``, so it shares that parser."""
+    return parse_running_names(stdout)
 
 
 def build_run_argv(name, image, port, roots):
