@@ -1,0 +1,18 @@
+# Lean build context for the dashboard image.
+#
+# Strategy: deny everything, then re-include ONLY the two runtime paths the image
+# needs. This guarantees .git, .worktrees, docs/ (real run artifacts), tests,
+# other scripts (pr_resolver.py, release.py, validate_marketplace.py), and
+# __pycache__ never enter the build context — nothing but the server + its baked
+# UI assets is available to COPY.
+*
+
+# Re-include only the runtime files (NOT a blanket !scripts/, which would readmit
+# tests and unrelated tooling). Docker needs the directory entries re-included so
+# the traversal reaches the files below.
+!scripts
+scripts/*
+!scripts/dashboard_server.py
+!scripts/dashboard_assets
+scripts/dashboard_assets/*
+!scripts/dashboard_assets/**
