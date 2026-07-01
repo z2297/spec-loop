@@ -28,6 +28,9 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Client JS test suite (Node built-ins)
+        run: node --test --experimental-test-coverage scripts/dashboard_assets/index.test.mjs
+
       - name: Install Claude Code CLI
         run: npm install -g @anthropic-ai/claude-code
 
