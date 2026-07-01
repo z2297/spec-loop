@@ -4,16 +4,25 @@
 # Blank lines and full-line '#' comments are ignored. Every data entry MUST
 # carry a '# rationale'; measure_coverage.py refuses to run on a malformed or
 # rationale-less entry so this manifest stays auditable and cannot silently
-# grow into a place to hide genuinely-untested code.
+# grow into a place to hide genuinely-untested code. A range is also rejected if
+# it overshoots end-of-file or would remove more than 25% of a file's executable
+# lines (see validate_omit) — so it cannot collapse a file to a false 0/0 = 100%.
 #
-# Only two legitimate categories are excluded:
-#   1. `if __name__ == "__main__":` process-entry shims — never imported/run under unittest.
-#   2. The blocking serve_forever() daemon tail — cannot terminate under a unit test.
+# Only two legitimate categories are excluded, and both are inherent to running
+# the suite under `trace` rather than gaps in the tests:
+#   1. `if __name__ == "__main__": sys.exit(main())` process-entry shims — the
+#      module is imported (not run as __main__) under unittest, so this branch and
+#      its sys.exit line never execute. Each is the file's last two lines.
+#   2. The blocking serve_forever() daemon tail in dashboard_server — the server
+#      loop plus its KeyboardInterrupt/finally shutdown cannot run to completion
+#      inside a unit test (it would block forever), so those lines never execute.
+#
+# Line numbers verified against source on 2026-07-01; re-verify if these files move.
 
-scripts/dashboard_launcher.py:551-552    # __main__ entry shim; not executed under unittest import
-scripts/dashboard_server.py:663-664      # __main__ entry shim; not executed under unittest import
-scripts/pr_resolver.py:488-489           # __main__ entry shim; not executed under unittest import
-scripts/release.py:194-195               # __main__ entry shim; not executed under unittest import
-scripts/validate_marketplace.py:312-313  # __main__ entry shim; not executed under unittest import
+scripts/dashboard_launcher.py:551-552    # __main__ entry shim (if __name__/sys.exit(main())); not run as __main__ under unittest
+scripts/dashboard_server.py:663-664      # __main__ entry shim (if __name__/sys.exit(main())); not run as __main__ under unittest
+scripts/pr_resolver.py:488-489           # __main__ entry shim (if __name__/sys.exit(main())); not run as __main__ under unittest
+scripts/release.py:194-195               # __main__ entry shim (if __name__/sys.exit(main())); not run as __main__ under unittest
+scripts/validate_marketplace.py:313-314  # __main__ entry shim (if __name__/sys.exit(main())); not run as __main__ under unittest
 
-scripts/dashboard_server.py:654-659      # blocking serve_forever()/KeyboardInterrupt/finally daemon tail; cannot run to completion under a unit test
+scripts/dashboard_server.py:654-659      # blocking serve_forever() try/except KeyboardInterrupt/finally daemon tail; cannot run to completion under a unit test

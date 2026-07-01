@@ -22,6 +22,10 @@ jobs:
         run: python3 -m unittest discover -s scripts -p 'test_*.py'
 
       - name: Coverage floor gate (stdlib trace, no-regression)
+        # Per-file + total floors live in scripts/measure_coverage.py, set BELOW the
+        # measured coverable maxima by a >=5-point margin (local measurement vs this
+        # py3.12 runner can drift on co_lines() attribution). Fails closed: non-zero
+        # exit on any floor breach, a collapsed/empty suite, or a runaway OMIT.
         run: python3 scripts/measure_coverage.py
 
       - uses: actions/setup-node@v4
@@ -35,8 +39,9 @@ jobs:
         #     emptied/truncated suite (`node --test` exits 0 on zero registered
         #     tests), mirroring the Python lane's MIN_TESTS guard in
         #     measure_coverage.py.
-        # A JS coverage NUMBER gate is deferred to s7 (Node 20 lacks per-metric
-        # threshold flags — --experimental-test-coverage is report-only here).
+        # A JS coverage NUMBER threshold is intentionally not gated: Node 20's
+        # --experimental-test-coverage is report-only (no per-metric threshold
+        # flags), so we surface the report and gate on test success + count instead.
         run: |
           out=$(node --test --experimental-test-coverage scripts/dashboard_assets/index.test.mjs 2>&1)
           rc=$?

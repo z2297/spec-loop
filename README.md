@@ -122,6 +122,46 @@ branch ruleset** for `main` → enable **Require status checks to pass before me
 add the **`validate`** check (also recommended: **Require a pull request before merging**).
 After that, a red `validate` check blocks the merge.
 
+### Test coverage
+
+Coverage is enforced in CI with **standard-library tooling only** — no `coverage.py`,
+no third-party deps, deterministic and no-Docker.
+
+- **Python** (`scripts/*.py`): `scripts/measure_coverage.py` runs the full
+  `unittest` suite in-process under the stdlib [`trace`](https://docs.python.org/3/library/trace.html)
+  module. Executed lines come from `trace`; the executable-line denominator comes
+  from `code.co_lines()` (bytecode-derived, not a regex). Inside the tracer it
+  re-imports the target modules and *then* discovers the suite, so import-time-only
+  lines (module constants, `def`/`class` headers, decorators) are counted while the
+  discovered tests still `mock.patch` the same module objects.
+- **Client JS** (`scripts/dashboard_assets/*.mjs`): `node --test
+  --experimental-test-coverage`. Node's coverage output is report-only (no
+  per-metric threshold flags on Node 20), so the JS gate enforces test *success*
+  plus a minimum test count rather than a coverage number.
+
+**Exclusion policy.** The only lines excluded from the Python ratios are ones that
+genuinely never run under a unit test: the `if __name__ == "__main__":
+sys.exit(main())` process-entry shims and the blocking `serve_forever()` daemon
+tail. They live in `scripts/coverage_omit.txt`; **every entry must carry a
+`# rationale`**, and the gate refuses to run on a malformed or rationale-less entry
+or on a range that would zero out a file — the manifest cannot become a place to
+hide untested code.
+
+**Enforced floors.** Per-file and total floors live in `scripts/measure_coverage.py`
+(`PER_FILE_FLOORS` / `TOTAL_FLOOR`). They are set **below** the measured coverable
+maxima by a **≥5-percentage-point margin**, because CI runs python 3.12 while local
+measurement may differ, and `co_lines()` attribution can drift across versions; the
+margin keeps the gate from a false red on that drift. Both gates **fail closed**:
+non-zero exit on any floor breach, a collapsed/empty suite (`MIN_TESTS`), or a
+runaway OMIT.
+
+**Run both locally:**
+
+```
+python3 scripts/measure_coverage.py
+node --test --experimental-test-coverage scripts/dashboard_assets/index.test.mjs
+```
+
 ## Channels & release model
 
 | Channel | Install target              | Backed by      | Meaning                          |

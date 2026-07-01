@@ -5,9 +5,16 @@ parsing, OMIT application, and the threshold pass/fail decision — the parts
 that decide whether the coverage gate is honest. The trace-driven suite
 runner (I/O shell) is exercised end-to-end by running the tool in CI.
 
+The corrected run-under-trace seam is exercised end-to-end in ``TracedRunTests``
+by invoking the real tool in a clean subprocess (never in-process — see that
+class's docstring for why).
+
 Usage: python3 -m unittest scripts.test_measure_coverage
        (or) python3 scripts/test_measure_coverage.py
 """
+import json
+import os
+import subprocess
 import sys
 import textwrap
 import unittest
@@ -139,6 +146,109 @@ class ValidateOmitTests(unittest.TestCase):
     def test_empty_omit_is_noop(self):
         target = mc.FileLines("scripts/x.py", {1, 2, 3}, line_count=10)
         mc.validate_omit(target, set())
+
+
+# One shared subprocess run of the real tool, reused across the seam assertions.
+# Run in a CLEAN interpreter (never in-process): the corrected seam re-imports the
+# targets to trace their import-time lines, and doing that inside the running suite
+# would swap sys.modules out from under sibling test modules that already bound the
+# target via `import <target> as ...` (the exact 310->12 identity split we guard
+# against). A subprocess is also precisely how CI invokes the tool.
+_SEAM_RESULT: dict | None = None
+
+
+def _run_tool_with_probe() -> dict:
+    """Run measure_coverage.py in a subprocess with a one-shot probe attached.
+
+    The probe (COVPROBE=1) makes the tool, after its real run under trace, emit a
+    single machine-readable JSON line reporting whether the suite passed, how many
+    tests ran, whether the release.py import-time-only line was counted, and whether
+    module identity held — without changing the tool's normal behavior or output.
+    """
+    global _SEAM_RESULT
+    if _SEAM_RESULT is not None:
+        return _SEAM_RESULT
+    scripts_dir = Path(mc.__file__).resolve().parent
+    env = {**os.environ, "COVPROBE": "1"}
+    proc = subprocess.run(
+        [sys.executable, str(scripts_dir / "measure_coverage.py")],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(scripts_dir.parent),
+    )
+    probe_line = next(
+        (ln for ln in proc.stdout.splitlines() if ln.startswith("COVPROBE ")),
+        None,
+    )
+    assert probe_line is not None, (
+        "tool did not emit COVPROBE line; stdout tail:\n"
+        + "\n".join(proc.stdout.splitlines()[-5:])
+        + "\nstderr tail:\n"
+        + "\n".join(proc.stderr.splitlines()[-5:])
+    )
+    _SEAM_RESULT = {
+        "returncode": proc.returncode,
+        "probe": json.loads(probe_line[len("COVPROBE "):]),
+        "stdout": proc.stdout,
+    }
+    return _SEAM_RESULT
+
+
+class TracedRunTests(unittest.TestCase):
+    """Cover the run-under-trace seam: the corrected tool must re-import the
+    targets AND discover the suite INSIDE the tracer, in that order, so import-
+    time-only lines get counted and every test module binds to the same traced
+    module object each ``mock.patch`` targets.
+
+    Runs the real tool once in a clean subprocess (see ``_run_tool_with_probe``)
+    and asserts against its one-shot probe — the ordering these lock in is exactly
+    what a prior regression broke (310 -> 12 tests when the suite was discovered
+    against a stale module identity).
+
+    Recursion guard: the tool runs THIS suite under trace, so these tests are also
+    discovered inside the tool's own run. When that happens (mc.ACTIVE_ENV set) we
+    skip — otherwise each would spawn another tool subprocess and fork-bomb. The
+    real assertions run only in the ordinary top-level ``unittest`` invocation.
+    """
+
+    def setUp(self):
+        if os.environ.get(mc.ACTIVE_ENV) == "1":
+            self.skipTest("inside a measure_coverage run; seam asserted at top level")
+
+    def test_suite_still_green_and_meets_min_tests(self):
+        r = _run_tool_with_probe()
+        self.assertTrue(
+            r["probe"]["passed"], "suite must run green under the corrected seam"
+        )
+        self.assertGreaterEqual(
+            r["probe"]["tests_run"],
+            mc.MIN_TESTS,
+            "corrected seam must still discover the full suite, not collapse it",
+        )
+
+    def test_import_time_only_line_is_now_counted(self):
+        # release.py line 39 (PLUGIN_MANIFEST = "...") is a module-level constant:
+        # executable, but only ever runs at import. The old import-before-trace
+        # tool left it in the denominator yet never the numerator. The corrected
+        # tool re-imports under trace, so it must now be COUNTED as executed.
+        r = _run_tool_with_probe()
+        self.assertIn(
+            39,
+            r["probe"]["release_executed"],
+            "import-time-only constant must be counted by the corrected tool",
+        )
+
+    def test_module_identity_holds_after_corrected_run(self):
+        # test_pr_resolver does `import pr_resolver as pr` and patches against `pr`.
+        # If discovery ran against a stale/duplicate identity, patches would miss.
+        # The probe reports whether sys.modules['pr_resolver'] IS the object the
+        # discovered test module bound.
+        r = _run_tool_with_probe()
+        self.assertTrue(
+            r["probe"]["identity_holds"],
+            "discovered test module must bind the same traced target object",
+        )
 
 
 class EvaluateTests(unittest.TestCase):

@@ -11,24 +11,28 @@ Design notes
 * STDLIB ONLY. Uses ``trace`` for executed lines and ``code.co_lines()`` (via
   ``compile``) for the executable-line denominator — bytecode-derived truth,
   not a regex heuristic. No coverage.py / pytest / third-party.
-* DETERMINISTIC. Floors are fixed integers (percentages) captured from a real
-  baseline measurement and rounded DOWN for a safety margin, so a minor
-  executable-set drift between the local interpreter and CI's python 3.12
-  cannot make a floor unreachable and wedge CI with a false red.
+* DETERMINISTIC. Floors are fixed integers (percentages) set BELOW the measured
+  coverable maxima by a >=5-point margin (see PER_FILE_FLOORS), so a minor
+  executable-set drift between the local interpreter and CI's python 3.12 cannot
+  make a floor unreachable and wedge CI with a false red.
 * The tool measures the product modules only; ``measure_coverage.py`` itself and
   the ``test_*.py`` files are excluded from the MEASURED set — the tool's own
   logic is covered by ``scripts/test_measure_coverage.py``.
 
-Coverage semantics: this gate measures RUNTIME line coverage. Test discovery
-imports the target modules (their ``test_*.py`` import them) BEFORE tracing
-starts, so lines that only ever execute at import time — module-level constants,
-``import`` statements, ``def``/``class`` header lines, decorators — are counted in
-the executable denominator but can never appear in the traced numerator. This
-biases toward UNDER-reporting (the safe direction: false-red, never false-green),
-and the floors were baselined against this same methodology, so it is internally
-consistent. It does mean a module's percentage reflects "lines reached while the
-suite runs", not "lines that syntactically exist", so a fully-exercised module
-with much module-level code can read well below 100%.
+Coverage semantics: this gate measures RUNTIME line coverage with CORRECTED
+attribution. Inside ``tracer.runfunc`` it first re-imports the target modules
+(replacing them in ``sys.modules``) and only THEN discovers and runs the suite —
+so lines that execute only at import time (module-level constants, ``import``
+statements, ``def``/``class`` header lines, decorators) run under the tracer and
+ARE counted, while the discovered test modules still bind and ``mock.patch`` the
+same freshly-traced module objects (single module identity — the ordering is
+load-bearing; discovering before the re-import splits identity and breaks the
+patches). A module's percentage therefore reflects lines the suite actually
+reaches, and a fully-exercised module reads at ~100%. The only lines that remain
+uncounted are ones that genuinely never run under a unit test — the
+``if __name__ == "__main__"`` process-entry shims and the blocking
+``serve_forever()`` daemon tail — which the audited OMIT manifest removes from both
+numerator and denominator (it may not zero out a file; see ``validate_omit``).
 
 Anti-false-green guards: the gate refuses to report coverage unless the suite
 actually ran a plausible number of tests (``MIN_TESTS``), and the OMIT manifest
@@ -39,6 +43,9 @@ Usage: python3 scripts/measure_coverage.py
 """
 from __future__ import annotations
 
+import importlib
+import json
+import os
 import sys
 import trace
 import unittest
@@ -48,10 +55,18 @@ from pathlib import Path
 SCRIPTS_DIR = Path(__file__).resolve().parent
 OMIT_FILE = SCRIPTS_DIR / "coverage_omit.txt"
 
+# Recursion guard. This tool runs the whole scripts/test_*.py suite under trace —
+# which includes test_measure_coverage's seam test, and that test invokes this tool
+# in a subprocess. Without a guard the subprocess would run the suite again → fork
+# bomb. We set this env var while the traced suite runs so the seam test detects it
+# is *inside* a tool run and skips spawning another one.
+ACTIVE_ENV = "MEASURE_COVERAGE_ACTIVE"
+
 # Anti-false-green: the suite must run at least this many tests or the gate
 # refuses to report (an empty/collapsed discovery makes wasSuccessful() True).
-# Set below the current 188-test baseline with margin so ordinary test churn
-# doesn't trip it, but a wholesale discovery collapse does.
+# Set well below the current 313-test suite so ordinary test churn doesn't trip
+# it, but a wholesale discovery collapse (the 313->12 identity-split regression,
+# or an empty discovery) does.
 MIN_TESTS = 150
 
 # Anti-false-green: OMIT may not remove more than this fraction of any one
@@ -67,26 +82,38 @@ TARGET_FILES = (
     "scripts/validate_marketplace.py",
 )
 
-# Per-file and total floors (integer percent), captured from a real baseline
-# measurement and rounded DOWN for a py3.12-vs-local safety margin. A file must
-# not be able to hide behind the total, so both gates apply.
-# Baseline measured on 2026-07-01 with THIS tool (stdlib trace + co_lines()
-# denominator) on the 188-test suite:
-#   launcher 65.7% (157/239), server 45.0% (166/369), pr_resolver 80.7% (221/274),
-#   release 0.0% (0/125), validate_marketplace 53.9% (111/206); TOTAL 54.0% (655/1213).
-# Floors are these numbers rounded DOWN (~2-3 pts margin) so the gate stays green
-# and deterministic on CI's python 3.12 despite any minor executable-set drift.
-# (The 72.4% figure recorded at intake used a different, smaller denominator; this
-# co_lines()-based denominator is larger and more honest, so the percentages differ.
-# Later slices raise coverage and the final slice ratchets these floors up.)
+# Importable module names for the targets (``scripts/release.py`` -> ``release``),
+# used to re-import them fresh under trace so their import-time-only lines count.
+TARGET_MODULES = tuple(Path(t).stem for t in TARGET_FILES)
+
+# Per-file and total floors (integer percent). A file must not be able to hide
+# behind the total, so both gates apply.
+#
+# Baseline measured on 2026-07-01 with THIS tool (corrected seam: targets re-
+# imported AND the suite discovered INSIDE the tracer, re-import first) on the
+# 313-test suite, minus the OMIT manifest — the true coverable maxima:
+#   launcher 100.0% (239/239), server 100.0% (369/369), pr_resolver 100.0%
+#   (274/274), release 100.0% (125/125), validate_marketplace 100.0% (207/207);
+#   TOTAL 100.0% (1214/1214).
+#
+# MARGIN RATIONALE (≥5 percentage points, rounded DOWN). Those maxima are from a
+# LOCAL interpreter; CI runs python 3.12, and co_lines() attribution can drift
+# across versions on decorators, multi-line calls, and match statements. No py3.12
+# is available locally to validate, so every floor is set conservatively below the
+# coverable-max — never at it — so a minor executable-set drift cannot wedge CI
+# with a false red. pr_resolver additionally carries a documented py3.12 preview of
+# ~85.4% (roughly 40 lines that go unhit on 3.12 but are hit locally); its floor is
+# set from THAT lower figure minus the margin (a real, healthy floor — not a bug,
+# and not chased in this slice), not from the optimistic local 100%. The TOTAL floor
+# likewise sits well under the py3.12 aggregate that pr_resolver drags down.
 PER_FILE_FLOORS = {
-    "scripts/dashboard_launcher.py": 63,
-    "scripts/dashboard_server.py": 42,
-    "scripts/pr_resolver.py": 78,
-    "scripts/release.py": 0,
-    "scripts/validate_marketplace.py": 51,
+    "scripts/dashboard_launcher.py": 95,   # local 100% - 5
+    "scripts/dashboard_server.py": 95,     # local 100% - 5
+    "scripts/pr_resolver.py": 80,          # py3.12 preview 85.4% - 5 (not local 100%)
+    "scripts/release.py": 95,              # local 100% - 5
+    "scripts/validate_marketplace.py": 94, # local 100% - ~6 (extra head-room)
 }
-TOTAL_FLOOR = 51
+TOTAL_FLOOR = 90  # py3.12 aggregate ~96-97% (pr_resolver-dragged) - margin
 
 
 @dataclass
@@ -278,28 +305,62 @@ def evaluate(
 # --------------------------------------------------------------------------- #
 # I/O shell: run the suite under trace, build stats, report, exit
 # --------------------------------------------------------------------------- #
-def _load_suite() -> unittest.TestSuite:
+def _reimport_targets() -> None:
+    """Re-import each target module fresh so its import-time lines run under trace.
+
+    ``sys.modules`` is likely already populated (importing this tool or discovering
+    tests can pull the targets in); popping and re-importing forces the module-level
+    body — constants, ``import``/``def``/``class`` headers, decorators — to execute
+    again, this time while the tracer is counting. Critically this must run BEFORE
+    ``discover()`` so each test module's own ``import <target> as ...`` binds to the
+    freshly-traced object left in ``sys.modules`` (single module identity), keeping
+    every ``mock.patch`` site aimed at the object the suite actually exercises.
+    """
+    if str(SCRIPTS_DIR) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS_DIR))
+    for name in TARGET_MODULES:
+        sys.modules.pop(name, None)
+        importlib.import_module(name)
+
+
+def _discover_suite() -> unittest.TestSuite:
     """Discover the same suite CI runs: scripts/test_*.py."""
-    return unittest.defaultTestLoader.discover(
+    return unittest.TestLoader().discover(
         str(SCRIPTS_DIR), pattern="test_*.py", top_level_dir=str(SCRIPTS_DIR)
     )
 
 
-def _run_under_trace(suite: unittest.TestSuite) -> tuple[bool, int, dict]:
+def _run_under_trace() -> tuple[bool, int, dict]:
     """Run the suite under trace.Trace; return (suite_passed, tests_run, counts).
 
-    If ``runner.run`` raises (e.g. a test crashes the interpreter under trace),
-    the original exception propagates rather than surfacing as a confusing
-    KeyError — a suite that could not run must fail loudly, never pass.
+    The load-bearing ordering happens INSIDE ``tracer.runfunc``: (1) re-import the
+    targets fresh, then (2) discover the suite, then (3) run it. Doing the re-import
+    and discovery both under trace — re-import first — means the traced module
+    objects are the same ones the discovered test modules bind and patch, so
+    import-time lines are counted without splitting module identity.
+
+    If any step raises (e.g. a test crashes the interpreter under trace), the
+    original exception propagates rather than surfacing as a confusing KeyError —
+    a suite that could not run must fail loudly, never pass.
     """
     tracer = trace.Trace(count=1, trace=0)
     runner = unittest.TextTestRunner(stream=sys.stderr, verbosity=1)
     result_holder: dict[str, unittest.TestResult] = {}
 
     def _run() -> None:
+        _reimport_targets()
+        suite = _discover_suite()
         result_holder["result"] = runner.run(suite)
 
-    tracer.runfunc(_run)
+    prior = os.environ.get(ACTIVE_ENV)
+    os.environ[ACTIVE_ENV] = "1"
+    try:
+        tracer.runfunc(_run)
+    finally:
+        if prior is None:
+            os.environ.pop(ACTIVE_ENV, None)
+        else:
+            os.environ[ACTIVE_ENV] = prior
     results = tracer.results()
     result = result_holder["result"]
     return result.wasSuccessful(), result.testsRun, results.counts
@@ -355,9 +416,40 @@ def _print_report(stats: dict[str, FileStat], result: GateResult) -> None:
             print(f"  - {b}")
 
 
+def _emit_probe(suite_passed: bool, tests_run: int, counts: dict) -> None:
+    """Emit a one-shot machine-readable line for the seam test (COVPROBE=1 only).
+
+    Reports whether the corrected seam kept the suite green, how many tests ran,
+    which ``release.py`` lines were counted (so a caller can confirm an import-time-
+    only line is now attributed), and whether module identity held — i.e. the
+    discovered ``test_pr_resolver`` bound the very object left in ``sys.modules`` by
+    the under-trace re-import. Purely observational; no effect on the gate result.
+    """
+    release_executed = sorted(
+        lineno
+        for (abs_path, lineno), hits in counts.items()
+        if normalize_key(abs_path) == "scripts/release.py" and hits > 0 and lineno >= 1
+    )
+    pr_mod = sys.modules.get("pr_resolver")
+    test_mod = sys.modules.get("test_pr_resolver")
+    identity_holds = bool(
+        pr_mod is not None
+        and test_mod is not None
+        and getattr(test_mod, "pr", None) is pr_mod
+    )
+    payload = {
+        "passed": suite_passed,
+        "tests_run": tests_run,
+        "release_executed": release_executed,
+        "identity_holds": identity_holds,
+    }
+    print("COVPROBE " + json.dumps(payload))
+
+
 def main() -> int:
-    suite = _load_suite()
-    suite_passed, tests_run, counts = _run_under_trace(suite)
+    suite_passed, tests_run, counts = _run_under_trace()
+    if os.environ.get("COVPROBE") == "1":
+        _emit_probe(suite_passed, tests_run, counts)
     if not suite_passed:
         print("FAIL: unittest suite did not pass — coverage not measured.",
               file=sys.stderr)
