@@ -29,14 +29,21 @@ jobs:
           node-version: "20"
 
       - name: Client JS test suite (Node built-ins)
-        # Fail closed on an emptied/truncated suite: `node --test` exits 0 when a
-        # file registers zero tests, so also assert a minimum count (mirrors the
-        # Python lane's MIN_TESTS guard in measure_coverage.py). A JS coverage
-        # NUMBER gate is deferred to s7 — Node 20 has no per-metric threshold flags.
+        # Two independent gates, both must pass:
+        #  1. node --test's own exit status — fails on ANY failing test.
+        #  2. a minimum test count parsed from the TAP summary — fails closed on an
+        #     emptied/truncated suite (`node --test` exits 0 on zero registered
+        #     tests), mirroring the Python lane's MIN_TESTS guard in
+        #     measure_coverage.py.
+        # A JS coverage NUMBER gate is deferred to s7 (Node 20 lacks per-metric
+        # threshold flags — --experimental-test-coverage is report-only here).
         run: |
-          set -o pipefail
           out=$(node --test --experimental-test-coverage scripts/dashboard_assets/index.test.mjs 2>&1)
+          rc=$?
           echo "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "FAIL: client JS test suite exited non-zero (rc=$rc)"; exit "$rc"
+          fi
           ran=$(printf '%s\n' "$out" | sed -n 's/^# tests \([0-9][0-9]*\).*/\1/p')
           if [ "${ran:-0}" -lt 12 ]; then
             echo "FAIL: only ${ran:-0} client JS tests ran (expected >= 12)"; exit 1
