@@ -419,7 +419,8 @@ class BindHostAllowlistTests(unittest.TestCase):
     def test_build_server_binds_configured_host(self):
         import tempfile
         with tempfile.TemporaryDirectory() as d:
-            server = ds.build_server(Path(d), port=0, bind_host="0.0.0.0")
+            server = ds.build_server(Path(d), port=0,
+                                     net=ds.NetworkConfig(bind_host="0.0.0.0"))
             try:
                 # Bound host reflects the request; allowlist stays loopback-only.
                 self.assertEqual(server.server_address[0], "0.0.0.0")
@@ -440,7 +441,7 @@ class BindHostAllowlistTests(unittest.TestCase):
             assets.mkdir()
             (assets / "index.html").write_text("<!doctype html>")
             server = ds.build_server(Path(d), assets_dir=assets, port=0,
-                                     bind_host="0.0.0.0")
+                                     net=ds.NetworkConfig(bind_host="0.0.0.0"))
             port = server.server_address[1]
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -464,8 +465,9 @@ class BindHostAllowlistTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             docs = Path(d) / "docs" / "spec-loop"
             write_dag(docs / "r", [slice_obj("s1", status="pending")])
-            server = ds.build_server(Path(d), port=0, bind_host="0.0.0.0",
-                                     advertise_port=8080)
+            server = ds.build_server(
+                Path(d), port=0,
+                net=ds.NetworkConfig(bind_host="0.0.0.0", advertise_port=8080))
             port = server.server_address[1]
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -474,6 +476,27 @@ class BindHostAllowlistTests(unittest.TestCase):
                 self.assertEqual(self._request_host(port, "127.0.0.1:8080"), 200)
                 # Host on the (real) bound port -> NOT in allowlist -> 421.
                 self.assertEqual(self._request_host(port, f"127.0.0.1:{port}"), 421)
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_advertise_port_zero_falls_back_to_bound_port(self):
+        # An explicit advertise_port=0 is falsy and must degrade to the real bound
+        # port (a reachable loopback allowlist), never an unreachable ":0" entry.
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            docs = Path(d) / "docs" / "spec-loop"
+            write_dag(docs / "r", [slice_obj("s1", status="pending")])
+            server = ds.build_server(Path(d), port=0,
+                                     net=ds.NetworkConfig(advertise_port=0))
+            port = server.server_address[1]
+            handler = server.RequestHandlerClass
+            self.assertNotIn("127.0.0.1:0", handler.allowed_hosts)
+            self.assertIn(f"127.0.0.1:{port}", handler.allowed_hosts)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                self.assertEqual(self._request_host(port, f"127.0.0.1:{port}"), 200)
             finally:
                 server.shutdown()
                 server.server_close()
@@ -550,6 +573,29 @@ class MultiRootTests(unittest.TestCase):
         # Colliding basenames must still yield two distinct ids.
         self.assertEqual(len(set(first)), 2)
 
+    def test_colliding_basenames_get_concrete_disjoint_suffixes(self):
+        # Guard the de-dup SCHEME, not just its count: the two colliding "repo"
+        # roots must map to concrete, disjoint namespaced ids in input order.
+        outer1 = self.tmp / "x" / "repo"
+        outer2 = self.tmp / "y" / "repo"
+        for r in (outer1, outer2):
+            (r / "docs" / "spec-loop").mkdir(parents=True)
+            write_dag(r / "docs" / "spec-loop" / "run-x",
+                      [slice_obj("s1", status="pending")])
+        ids = sorted(r["run_id"] for r in
+                     ds.scan_all_roots([str(outer1), str(outer2)]))
+        self.assertEqual(ids, ["repo#1:run-x", "repo#2:run-x"])
+
+    def test_single_root_run_id_with_colon_resolves_transparently(self):
+        # A single-root run whose basename literally contains ':' must NOT be
+        # split/namespaced — the empty-key branch resolves it as-is.
+        root = self._root("repo")
+        write_dag(root / "docs" / "spec-loop" / "a:b",
+                  [slice_obj("s1", status="pending")])
+        runs = ds.scan_all_roots([str(root)])
+        self.assertEqual([r["run_id"] for r in runs], ["a:b"])
+        self.assertNotIn("root", runs[0])
+
 
 class MultiRootHttpTests(unittest.TestCase):
     """Per-root containment over a real socket — a namespaced id may never reach
@@ -608,6 +654,18 @@ class MultiRootHttpTests(unittest.TestCase):
         # 'only-b' exists only in root B; asking for it namespaced to root A misses.
         status, _ = self._get("/api/runs/repo-a%3Aonly-b")
         self.assertEqual(status, 404)
+
+    def test_bogus_root_key_and_bare_id_miss_uniformly(self):
+        # A syntactically valid but unknown key, and a bare (unqualified) id, must
+        # both return the SAME no-oracle 404 body as a matched-key missing run —
+        # never a fall-back that searches all roots.
+        _, plain_miss = self._get("/api/runs/repo-a%3Adoes-not-exist")
+        for path in ("/api/runs/nosuchrepo%3Aonly-a",  # unknown key
+                     "/api/runs/only-a",               # bare id, no key
+                     "/api/runs/%3Aonly-a"):           # empty key
+            status, body = self._get(path)
+            self.assertEqual(status, 404, f"{path} -> {status}")
+            self.assertEqual(body, plain_miss, f"path oracle on {path}")
 
     def test_crafted_namespaced_id_cannot_escape_or_oracle(self):
         # Uniform no-path-oracle 404: a crafted traversal id and a plain miss must

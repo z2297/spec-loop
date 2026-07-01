@@ -46,6 +46,14 @@ from pathlib import Path
 Response = namedtuple("Response", "status body content_type etag")
 Response.__new__.__defaults__ = (None,)
 
+# Network settings value object: groups the two decoupled network knobs so
+# build_server takes one argument instead of two (mirrors Response). ``bind_host``
+# is the socket bind address ONLY (0.0.0.0 is intended for inside a container);
+# ``advertise_port`` is the published port a browser targets and is the SOLE
+# driver of the Host-header allowlist. Binding 0.0.0.0 never widens the allowlist.
+NetworkConfig = namedtuple("NetworkConfig", "bind_host advertise_port")
+NetworkConfig.__new__.__defaults__ = ("127.0.0.1", None)
+
 
 def _text(status, message):
     return Response(status, message, "text/plain")
@@ -427,7 +435,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         resolved within the run's OWNING root only."""
         material = []
         for run in runs:
-            run_dir = self._resolve_run_dir(run["run_id"])
+            _root_key, run_dir = self._resolve_run_dir(run["run_id"])
+            # "-" only if a run listed at scan time fails re-resolution (e.g. a
+            # concurrent delete between the two globs) — an intentional weaker
+            # cache key, never a wrong body. Correctness never depends on it.
             etag = _run_etag(Path(run_dir)) if run_dir else "-"
             material.append(f"{run['run_id']}:{etag}")
         return material
@@ -437,48 +448,43 @@ class DashboardHandler(BaseHTTPRequestHandler):
         # %3A); decode before parsing. Containment (resolve_within) remains the
         # safety net for any traversal a decode might reveal.
         namespaced = urllib.parse.unquote(raw_id).rstrip("/")
-        run_dir = self._resolve_run_dir(namespaced)
+        root_key, run_dir = self._resolve_run_dir(namespaced)
         if run_dir is None:
             return _text(404, b"not found")
-        run = _namespace_run(_scan_one_run(Path(run_dir)), self._root_key(namespaced))
+        run = _namespace_run(_scan_one_run(Path(run_dir)), root_key)
         etag = _run_etag(Path(run_dir))
         return self._not_modified(etag) or _json_response(run, etag)
-
-    def _root_key(self, namespaced_id):
-        """The owning root key for a (possibly namespaced) id, or '' if single-root
-        or unqualified. Split on the FIRST ':' only so a bare id is never mis-split."""
-        if len(self.roots) == 1 and self.roots[0][0] == "":
-            return ""
-        key = namespaced_id.split(":", 1)[0]
-        return key if any(k == key for k, _ in self.roots) else ""
 
     def _resolve_run_dir(self, namespaced_id):
         """Path-traversal-safe, per-root: identify the OWNING root by its key, then
         enumerate ONLY that root's discovered run dirs, exact-match the (bare)
         run-id basename, and realpath-confine within that ONE root. A namespaced id
-        from root A can never enumerate or resolve within root B. Returns the dir or
-        None — one uniform miss for "no such run" and "escapes root" (no oracle)."""
-        data_root, run_id = self._owning_root_and_run_id(namespaced_id)
+        from root A can never enumerate or resolve within root B. Returns
+        ``(root_key, run_dir)`` or ``(root_key, None)`` — one uniform miss for "no
+        such run" and "escapes root" (no oracle)."""
+        root_key, data_root, run_id = self._owning_root(namespaced_id)
         if data_root is None:
-            return None
+            return "", None
         known = {Path(p).parent.name for p in
                  glob.glob(str(Path(data_root) / "*" / "dag.json"))}
         if run_id not in known:
-            return None
+            return root_key, None
         run_dir = resolve_within(data_root, run_id)
-        return run_dir if run_dir and os.path.isdir(run_dir) else None
+        confined = run_dir if run_dir and os.path.isdir(run_dir) else None
+        return root_key, confined
 
-    def _owning_root_and_run_id(self, namespaced_id):
-        """Resolve a (possibly namespaced) id to ``(data_root, bare_run_id)``, or
-        ``(None, None)`` if no root owns it. Single-root -> the sole root, id as-is.
-        Multi-root -> split on the FIRST ':' and match the key exactly."""
+    def _owning_root(self, namespaced_id):
+        """Resolve a (possibly namespaced) id to ``(root_key, data_root,
+        bare_run_id)``, or ``("", None, None)`` if no root owns it. Single-root ->
+        the sole root (empty key), id as-is. Multi-root -> split on the FIRST ':'
+        and match the key exactly so a bare id is never mis-split."""
         if len(self.roots) == 1 and self.roots[0][0] == "":
-            return self.roots[0][1], namespaced_id
+            return "", self.roots[0][1], namespaced_id
         key, _, run_id = namespaced_id.partition(":")
         for root_key, data_root in self.roots:
             if root_key == key:
-                return data_root, run_id
-        return None, None
+                return root_key, data_root, run_id
+        return "", None, None
 
     def _serve_static(self, route):
         rel = route.lstrip("/") or "index.html"
@@ -542,8 +548,7 @@ def _content_type(path):
 # Wiring
 # ==========================================================================
 
-def build_server(root, assets_dir=None, port=DEFAULT_PORT,
-                 *, bind_host="127.0.0.1", advertise_port=None):
+def build_server(root, assets_dir=None, port=DEFAULT_PORT, net=NetworkConfig()):
     """Build (but do not start) a ThreadingHTTPServer.
 
     ``root`` is a repo root (str/Path) OR a list of repo roots. Each root's data
@@ -551,12 +556,13 @@ def build_server(root, assets_dir=None, port=DEFAULT_PORT,
     per-root key (empty for a single root -> transparent, back-compatible).
     ``assets_dir`` defaults to this script's bundled ``dashboard_assets/``.
 
-    ``bind_host`` is the socket bind address ONLY (``0.0.0.0`` is intended for
-    inside a container); it is decoupled from — and NEVER widens — the Host-header
-    allowlist. The allowlist is derived from ``advertise_port`` (the published
-    port a browser targets), defaulting to the effective bound port. Port 0 -> an
-    ephemeral port (used by tests). This is the load-bearing anti-DNS-rebinding
-    invariant: binding ``0.0.0.0`` does not add any host to the allowlist."""
+    ``net`` (a ``NetworkConfig``) carries the bind host and advertised port. The
+    bind host is the socket bind address ONLY and is decoupled from — and NEVER
+    widens — the Host-header allowlist. The allowlist is derived from the
+    advertised port (the published port a browser targets), defaulting to the
+    effective bound port. Port 0 -> an ephemeral port (used by tests). This is the
+    load-bearing anti-DNS-rebinding invariant: binding ``0.0.0.0`` does not add
+    any host to the allowlist."""
     roots = _resolve_roots(root)
     if assets_dir is None:
         assets_dir = Path(__file__).resolve().parent / ASSETS_SUBPATH
@@ -565,13 +571,15 @@ def build_server(root, assets_dir=None, port=DEFAULT_PORT,
     handler = type("BoundDashboardHandler", (DashboardHandler,), {
         "roots": roots,
         "assets_root": assets_root,
-        "allowed_hosts": _host_allowlist(advertise_port or port),
+        "allowed_hosts": set(),  # fixed below once the real port is known
     })
-    server = ThreadingHTTPServer((bind_host, port), handler)
-    # If neither port nor advertise_port was pinned, fix the allowlist to the
-    # real assigned port so ephemeral-port callers (tests) can still reach it.
-    if advertise_port is None and port == 0:
-        handler.allowed_hosts = _host_allowlist(server.server_address[1])
+    server = ThreadingHTTPServer((net.bind_host, port), handler)
+    # The advertised port drives the allowlist. A falsy advertise_port (None or 0)
+    # means "use the effective bound port" — so an ephemeral port 0, with or
+    # without an explicit advertise_port=0, still yields a reachable loopback
+    # allowlist and never an unreachable ":0" entry.
+    effective_advertise = net.advertise_port or server.server_address[1]
+    handler.allowed_hosts = _host_allowlist(effective_advertise)
     return server
 
 
@@ -630,15 +638,14 @@ def main() -> int:
     args = ap.parse_args()
 
     raw_roots = args.root or ["."]
-    roots = [Path(r).resolve() for r in raw_roots]
-    for data_root in (dr for _k, dr in _resolve_roots([str(r) for r in roots])):
+    roots = [str(Path(r).resolve()) for r in raw_roots]
+    for _key, data_root in _resolve_roots(roots):
         if not os.path.isdir(data_root):
             print(f"warning: {data_root} does not exist — no runs from it",
                   file=sys.stderr)
 
-    server = build_server([str(r) for r in roots], port=args.port,
-                          bind_host=args.bind_host,
-                          advertise_port=args.advertise_port)
+    server = build_server(roots, port=args.port,
+                          net=NetworkConfig(args.bind_host, args.advertise_port))
     bound_port = server.server_address[1]
     advertised = args.advertise_port or bound_port
     print(f"spec-loop dashboard (read-only) serving {len(roots)} root(s)")
