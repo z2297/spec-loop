@@ -155,7 +155,7 @@ def cut_release(root: Path, version: str, channel: str) -> None:
     print("Done.")
 
 
-def main() -> int:
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="spec-loop release helper")
     ap.add_argument("version", help="semver, e.g. 0.5.0 or 0.5.0-beta.1")
     ap.add_argument("--channel", choices=["stable", "beta", "alpha"],
@@ -163,7 +163,7 @@ def main() -> int:
     ap.add_argument("--root", default=".", help="repo root (default: cwd)")
     ap.add_argument("--notes", action="store_true",
                     help="print the CHANGELOG section for <version> and exit")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     root = Path(args.root).resolve()
     if not (root / MARKETPLACE).is_file():
