@@ -20,6 +20,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -441,7 +442,7 @@ class MainCliTest(unittest.TestCase):
         cwd = os.getcwd()
         self.addCleanup(os.chdir, cwd)
         td = tempfile.mkdtemp()
-        self.addCleanup(lambda: __import__("shutil").rmtree(td, ignore_errors=True))
+        self.addCleanup(lambda: shutil.rmtree(td, ignore_errors=True))
         os.chdir(td)
         rc, out, err = self._run_main([])
         self.assertIsInstance(rc, int)
@@ -646,6 +647,18 @@ class SourceObjectTest(unittest.TestCase):
         self.assertTrue(
             any("github source requires string 'repo'" in e for e in errors),
             f"github without repo must fail; got: {errors}",
+        )
+
+    def test_git_subdir_missing_one_of_multiple_keys_fails(self):
+        # git-subdir requires BOTH 'url' and 'path'; supplying only 'url' must fail
+        # on the missing 'path' — exercises the multi-key required-key loop.
+        ok, errors = self._run_source(
+            {"source": "git-subdir", "url": "https://example.com/repo.git"}
+        )
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("git-subdir source requires string 'path'" in e for e in errors),
+            f"git-subdir without path must fail; got: {errors}",
         )
 
     def test_empty_ref_fails(self):
