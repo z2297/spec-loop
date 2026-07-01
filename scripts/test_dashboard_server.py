@@ -1092,6 +1092,19 @@ class HandlerUnitTests(unittest.TestCase):
         self.assertIn("HTTP/1.1 405", head)
         self.assertIn("method not allowed", body)
 
+    def test_do_get_foreign_host_emits_421_on_wire(self):
+        # The anti-DNS-rebinding deny, exercised through the REAL do_GET -> _route
+        # -> _host_allowed on the test thread (trace-visible mirror of the socket
+        # suite's 421 assertions). A forged Host must yield 421 misdirected request.
+        self.handler.headers = {"Host": "evil.com"}
+        self.handler.path = "/api/runs"
+        self.handler.wfile = io.BytesIO()
+        self.handler.do_GET()
+        wire = self.handler.wfile.getvalue().decode("latin-1")
+        head, body = wire.split("\r\n\r\n", 1)
+        self.assertIn("HTTP/1.1 421", head)
+        self.assertIn("misdirected request", body)
+
     def test_serve_static_unreadable_file_is_404_no_partial_body(self):
         # A target that PASSES resolve_within + os.path.isfile but whose read
         # fails (e.g. a concurrent unlink / permission flip between the checks)
