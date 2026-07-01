@@ -8,12 +8,11 @@ runner (I/O shell) is exercised end-to-end by running the tool in CI.
 Usage: python3 -m unittest scripts.test_measure_coverage
        (or) python3 scripts/test_measure_coverage.py
 """
-import os
+import sys
 import textwrap
 import unittest
 from pathlib import Path
 
-import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import measure_coverage as mc  # noqa: E402
 
@@ -111,6 +110,35 @@ class ApplyOmitTests(unittest.TestCase):
         new_exec, new_run = mc.apply_omit(executable, executed, {2})
         self.assertEqual(new_exec, {1, 3})
         self.assertEqual(new_run, {1, 3})
+
+
+class ValidateOmitTests(unittest.TestCase):
+    def test_omit_of_real_executable_lines_within_cap_is_ok(self):
+        target = mc.FileLines("scripts/x.py", set(range(1, 21)), line_count=40)
+        # 4 lines = 20% <= 25% cap
+        mc.validate_omit(target, {1, 2, 3, 4})
+
+    def test_range_spanning_non_executable_lines_is_ok(self):
+        # A range like a __main__ shim (551-552) legitimately covers a mix of
+        # executable and non-executable lines; the non-executable ones are no-ops.
+        # 551 is executable, 552 is not; only 1 of 100 executable lines is omitted.
+        target = mc.FileLines("scripts/x.py", set(range(1, 100)) | {551}, 560)
+        mc.validate_omit(target, {551, 552})
+
+    def test_omit_past_end_of_file_raises(self):
+        target = mc.FileLines("scripts/x.py", {1, 2, 3}, line_count=10)
+        with self.assertRaises(ValueError):
+            mc.validate_omit(target, {99})
+
+    def test_omit_exceeding_executable_fraction_cap_raises(self):
+        # 6 of 10 executable lines omitted = 60% > 25% cap
+        target = mc.FileLines("scripts/x.py", set(range(1, 11)), line_count=20)
+        with self.assertRaises(ValueError):
+            mc.validate_omit(target, set(range(1, 7)))
+
+    def test_empty_omit_is_noop(self):
+        target = mc.FileLines("scripts/x.py", {1, 2, 3}, line_count=10)
+        mc.validate_omit(target, set())
 
 
 class EvaluateTests(unittest.TestCase):

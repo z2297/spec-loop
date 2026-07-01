@@ -19,6 +19,22 @@ Design notes
   the ``test_*.py`` files are excluded from the MEASURED set — the tool's own
   logic is covered by ``scripts/test_measure_coverage.py``.
 
+Coverage semantics: this gate measures RUNTIME line coverage. Test discovery
+imports the target modules (their ``test_*.py`` import them) BEFORE tracing
+starts, so lines that only ever execute at import time — module-level constants,
+``import`` statements, ``def``/``class`` header lines, decorators — are counted in
+the executable denominator but can never appear in the traced numerator. This
+biases toward UNDER-reporting (the safe direction: false-red, never false-green),
+and the floors were baselined against this same methodology, so it is internally
+consistent. It does mean a module's percentage reflects "lines reached while the
+suite runs", not "lines that syntactically exist", so a fully-exercised module
+with much module-level code can read well below 100%.
+
+Anti-false-green guards: the gate refuses to report coverage unless the suite
+actually ran a plausible number of tests (``MIN_TESTS``), and the OMIT manifest
+cannot zero out a file — omitted lines must be real executable lines and OMIT may
+not remove more than ``MAX_OMIT_FRACTION`` of a file's executable lines.
+
 Usage: python3 scripts/measure_coverage.py
 """
 from __future__ import annotations
@@ -31,6 +47,16 @@ from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 OMIT_FILE = SCRIPTS_DIR / "coverage_omit.txt"
+
+# Anti-false-green: the suite must run at least this many tests or the gate
+# refuses to report (an empty/collapsed discovery makes wasSuccessful() True).
+# Set below the current 188-test baseline with margin so ordinary test churn
+# doesn't trip it, but a wholesale discovery collapse does.
+MIN_TESTS = 150
+
+# Anti-false-green: OMIT may not remove more than this fraction of any one
+# file's executable lines — a runaway range can't collapse a file to 0/0=100%.
+MAX_OMIT_FRACTION = 0.25
 
 # Product modules that count toward coverage (basename -> relpath key).
 TARGET_FILES = (
@@ -121,6 +147,42 @@ def normalize_key(path: str) -> str | None:
     return None
 
 
+def _parse_line_range(line_range: str, raw: str) -> tuple[int, int]:
+    """Parse ``START`` or ``START-END`` into an inclusive (start, end) pair."""
+    try:
+        if "-" in line_range:
+            start_s, end_s = line_range.split("-", 1)
+            start, end = int(start_s), int(end_s)
+        else:
+            start = end = int(line_range)
+    except ValueError as exc:
+        raise ValueError(f"malformed OMIT line range: {raw!r}") from exc
+    if start < 1 or end < start:
+        raise ValueError(f"invalid OMIT line range: {raw!r}")
+    return start, end
+
+
+def _parse_omit_line(raw: str) -> tuple[str, range] | None:
+    """Parse one manifest line into ``(relpath, line_range)``, or None to skip.
+
+    Raises ``ValueError`` on a malformed entry or one missing a rationale.
+    """
+    stripped = raw.strip()
+    if not stripped or stripped.startswith("#"):
+        return None
+    if "#" not in raw:
+        raise ValueError(f"OMIT entry missing '# rationale': {raw!r}")
+    spec, rationale = raw.split("#", 1)
+    if not rationale.strip():
+        raise ValueError(f"OMIT entry has empty rationale: {raw!r}")
+    spec = spec.strip()
+    if ":" not in spec:
+        raise ValueError(f"malformed OMIT entry (expected path:range): {raw!r}")
+    relpath, line_range = spec.rsplit(":", 1)
+    start, end = _parse_line_range(line_range, raw)
+    return relpath.strip(), range(start, end + 1)
+
+
 def parse_omit(text: str) -> dict[str, set[int]]:
     """Parse the OMIT manifest into ``{relpath: {lineno, ...}}``.
 
@@ -131,30 +193,11 @@ def parse_omit(text: str) -> dict[str, set[int]]:
     """
     result: dict[str, set[int]] = {}
     for raw in text.splitlines():
-        stripped = raw.strip()
-        if not stripped or stripped.startswith("#"):
+        parsed = _parse_omit_line(raw)
+        if parsed is None:
             continue
-        if "#" not in raw:
-            raise ValueError(f"OMIT entry missing '# rationale': {raw!r}")
-        spec, rationale = raw.split("#", 1)
-        if not rationale.strip():
-            raise ValueError(f"OMIT entry has empty rationale: {raw!r}")
-        spec = spec.strip()
-        if ":" not in spec:
-            raise ValueError(f"malformed OMIT entry (expected path:range): {raw!r}")
-        relpath, line_range = spec.rsplit(":", 1)
-        relpath = relpath.strip()
-        try:
-            if "-" in line_range:
-                start_s, end_s = line_range.split("-", 1)
-                start, end = int(start_s), int(end_s)
-            else:
-                start = end = int(line_range)
-        except ValueError:
-            raise ValueError(f"malformed OMIT line range: {raw!r}")
-        if start < 1 or end < start:
-            raise ValueError(f"invalid OMIT line range: {raw!r}")
-        result.setdefault(relpath, set()).update(range(start, end + 1))
+        relpath, lines = parsed
+        result.setdefault(relpath, set()).update(lines)
     return result
 
 
@@ -163,6 +206,43 @@ def apply_omit(
 ) -> tuple[set[int], set[int]]:
     """Remove omitted lines from both the executable and executed sets."""
     return executable - omit, executed - omit
+
+
+@dataclass
+class FileLines:
+    """The line facts about one target file that ``validate_omit`` checks against."""
+    relpath: str
+    executable: set[int]
+    line_count: int
+
+
+def validate_omit(target: FileLines, omit: set[int]) -> None:
+    """Guard the OMIT manifest against range typos that would zero out a file.
+
+    A manifest entry may legitimately be a *range* that spans a mix of executable
+    and non-executable lines (e.g. a ``__main__`` shim or a ``try/finally`` tail);
+    subtracting the non-executable ones is a harmless no-op. What must fail loudly
+    is (a) a range that OVERSHOOTS the file (names a line number past end-of-file —
+    a stale/fat-fingered range), or (b) an OMIT that removes more than
+    ``MAX_OMIT_FRACTION`` of the file's *executable* lines — either can silently
+    turn a real coverage regression into a 0/0 = 100% pass.
+    """
+    if not omit:
+        return
+    overshoot = {ln for ln in omit if ln > target.line_count}
+    if overshoot:
+        raise ValueError(
+            f"OMIT for {target.relpath} names line(s) {sorted(overshoot)} past "
+            f"end-of-file ({target.line_count} lines) — stale or overshooting range?"
+        )
+    executable = target.executable
+    omitted_executable = omit & executable
+    if executable and len(omitted_executable) > MAX_OMIT_FRACTION * len(executable):
+        raise ValueError(
+            f"OMIT for {target.relpath} removes {len(omitted_executable)}/"
+            f"{len(executable)} executable lines (> {MAX_OMIT_FRACTION:.0%}) — "
+            "refusing to let OMIT collapse a file."
+        )
 
 
 def evaluate(
@@ -176,22 +256,21 @@ def evaluate(
     total floor. Files with zero executable lines (all OMITted) count as full.
     """
     breaches: list[str] = []
-    total_executed = 0
-    total_executable = 0
     for relpath, stat in per_file.items():
-        total_executed += stat.executed
-        total_executable += stat.executable
         floor = floors.get(relpath, 0)
         if stat.pct + 1e-9 < floor:
             breaches.append(
                 f"{relpath}: {stat.pct:.1f}% < floor {floor}% "
                 f"({stat.executed}/{stat.executable})"
             )
-    total_pct = 100.0 if total_executable == 0 else 100.0 * total_executed / total_executable
-    if total_pct + 1e-9 < total_floor:
+    total = FileStat(
+        executed=sum(s.executed for s in per_file.values()),
+        executable=sum(s.executable for s in per_file.values()),
+    )
+    if total.pct + 1e-9 < total_floor:
         breaches.append(
-            f"TOTAL: {total_pct:.1f}% < floor {total_floor}% "
-            f"({total_executed}/{total_executable})"
+            f"TOTAL: {total.pct:.1f}% < floor {total_floor}% "
+            f"({total.executed}/{total.executable})"
         )
     return GateResult(passed=not breaches, breaches=breaches)
 
@@ -206,8 +285,13 @@ def _load_suite() -> unittest.TestSuite:
     )
 
 
-def _run_under_trace(suite: unittest.TestSuite) -> tuple[bool, dict]:
-    """Run the suite under trace.Trace; return (suite_passed, counts)."""
+def _run_under_trace(suite: unittest.TestSuite) -> tuple[bool, int, dict]:
+    """Run the suite under trace.Trace; return (suite_passed, tests_run, counts).
+
+    If ``runner.run`` raises (e.g. a test crashes the interpreter under trace),
+    the original exception propagates rather than surfacing as a confusing
+    KeyError — a suite that could not run must fail loudly, never pass.
+    """
     tracer = trace.Trace(count=1, trace=0)
     runner = unittest.TextTestRunner(stream=sys.stderr, verbosity=1)
     result_holder: dict[str, unittest.TestResult] = {}
@@ -217,8 +301,8 @@ def _run_under_trace(suite: unittest.TestSuite) -> tuple[bool, dict]:
 
     tracer.runfunc(_run)
     results = tracer.results()
-    suite_passed = result_holder["result"].wasSuccessful()
-    return suite_passed, results.counts
+    result = result_holder["result"]
+    return result.wasSuccessful(), result.testsRun, results.counts
 
 
 def _build_stats(counts: dict) -> dict[str, FileStat]:
@@ -238,6 +322,9 @@ def _build_stats(counts: dict) -> dict[str, FileStat]:
         executable = executable_lines(source, relpath)
         run = executed[relpath] & executable
         file_omit = omit.get(relpath, set())
+        validate_omit(
+            FileLines(relpath, executable, source.count("\n") + 1), file_omit
+        )
         executable, run = apply_omit(executable, run, file_omit)
         stats[relpath] = FileStat(executed=len(run), executable=len(executable))
     return stats
@@ -252,12 +339,13 @@ def _print_report(stats: dict[str, FileStat], result: GateResult) -> None:
             f"  {relpath:40s} {stat.pct:6.1f}% "
             f"{stat.executed:5d}/{stat.executable:<6d} {floor:5d}%"
         )
-    total_run = sum(s.executed for s in stats.values())
-    total_able = sum(s.executable for s in stats.values())
-    total_pct = 100.0 if total_able == 0 else 100.0 * total_run / total_able
+    total = FileStat(
+        executed=sum(s.executed for s in stats.values()),
+        executable=sum(s.executable for s in stats.values()),
+    )
     print(
-        f"  {'TOTAL':40s} {total_pct:6.1f}% "
-        f"{total_run:5d}/{total_able:<6d} {TOTAL_FLOOR:5d}%"
+        f"  {'TOTAL':40s} {total.pct:6.1f}% "
+        f"{total.executed:5d}/{total.executable:<6d} {TOTAL_FLOOR:5d}%"
     )
     if result.passed:
         print("PASS: all per-file and total floors met.")
@@ -267,15 +355,23 @@ def _print_report(stats: dict[str, FileStat], result: GateResult) -> None:
             print(f"  - {b}")
 
 
-def main(argv: list[str] | None = None) -> int:
+def main() -> int:
     suite = _load_suite()
-    suite_passed, counts = _run_under_trace(suite)
+    suite_passed, tests_run, counts = _run_under_trace(suite)
     if not suite_passed:
         print("FAIL: unittest suite did not pass — coverage not measured.",
               file=sys.stderr)
         return 1
+    # Anti-false-green: an empty/collapsed discovery yields wasSuccessful()==True
+    # over 0 tests. Refuse to measure coverage against a suite that barely ran.
+    if tests_run < MIN_TESTS:
+        print(f"FAIL: only {tests_run} tests ran (expected >= {MIN_TESTS}); "
+              "test discovery may have collapsed — coverage not measured.",
+              file=sys.stderr)
+        return 1
     stats = _build_stats(counts)
     result = evaluate(stats, PER_FILE_FLOORS, TOTAL_FLOOR)
+    print(f"suite: {tests_run} tests passed")
     _print_report(stats, result)
     return 0 if result.passed else 1
 
