@@ -713,7 +713,7 @@ class MultiRootHttpTests(unittest.TestCase):
 # the real _host_allowed / resolve_within / os.path.isfile run.
 # --------------------------------------------------------------------------
 
-def make_handler(tmp: Path, roots=None, assets_subdir="assets"):
+def make_handler(tmp: Path):
     """Return (bound_handler_instance, docs_path). Build the bound handler class
     via build_server (the single wiring authority) so roots/assets_root/
     allowed_hosts are injected exactly as in production, then instantiate it
@@ -721,13 +721,12 @@ def make_handler(tmp: Path, roots=None, assets_subdir="assets"):
     _emit needs on the test thread are set; send_response/send_header/end_headers
     run FOR REAL against a BytesIO wfile — no call-spies."""
     docs = build_fixture(tmp)
-    assets = tmp / assets_subdir
-    if not assets.exists():
-        assets.mkdir()
-        (assets / "index.html").write_text("<!doctype html><title>dash</title>")
-        (assets / "app.css").write_text("body{color:#fff}")
+    assets = tmp / "assets"
+    assets.mkdir()
+    (assets / "index.html").write_text("<!doctype html><title>dash</title>")
+    (assets / "app.css").write_text("body{color:#fff}")
     (tmp / "outside_secret.txt").write_text("TOP SECRET")
-    server = ds.build_server(roots or tmp, assets_dir=assets, port=0)
+    server = ds.build_server(tmp, assets_dir=assets, port=0)
     bound = server.RequestHandlerClass
     server.server_close()  # we never serve; we invoke methods directly
 
@@ -918,13 +917,21 @@ class HandlerUnitTests(unittest.TestCase):
         second = self.handler._route()
         self.assertEqual(second.status, 304)
 
-    def test_collection_material_tolerates_vanished_run(self):
-        # _collection_material resolves each run's dir within its owning root; a
-        # run listed but not resolvable yields a weaker "-" key, never a crash.
+    def test_collection_material_ok(self):
+        # /api/runs -> _serve_api_runs -> _collection_material (happy path).
         self.handler.headers = {"Host": self.host}
         self.handler.path = "/api/runs"
-        resp = self.handler._route()  # exercises _serve_api_runs -> _collection_material
+        resp = self.handler._route()
         self.assertEqual(resp.status, 200)
+
+    def test_collection_material_weak_key_when_run_unresolvable(self):
+        # A run listed at scan time but not resolvable within its owning root
+        # (e.g. a concurrent delete between the two globs) yields the weaker "-"
+        # cache key rather than crashing. Exercise that else-branch directly with
+        # a fabricated run id that scan_all_roots surfaces but _resolve_run_dir
+        # cannot resolve.
+        material = self.handler._collection_material([{"run_id": "vanished"}])
+        self.assertEqual(material, ["vanished:-"])
 
 
 # --------------------------------------------------------------------------
@@ -942,6 +949,16 @@ class MainEntrypointTests(unittest.TestCase):
         srv.serve_forever.side_effect = KeyboardInterrupt  # graceful-stop branch
         return srv
 
+    @contextlib.contextmanager
+    def _mocked_serve(self):
+        """Patch the ThreadingHTTPServer seam and capture both streams so main()
+        runs its real wiring without blocking. Yields (fake_server, out, err)."""
+        fake = self._fake_server()
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(ds, "ThreadingHTTPServer", return_value=fake), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            yield fake, out, err
+
     def test_main_wires_server_and_stops_gracefully(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -949,10 +966,7 @@ class MainEntrypointTests(unittest.TestCase):
             (root / "docs" / "spec-loop" / "r" / "dag.json").write_text(
                 json.dumps({"slices": [slice_obj("s1", status="pending")]})
             )
-            fake = self._fake_server()
-            out, err = io.StringIO(), io.StringIO()
-            with mock.patch.object(ds, "ThreadingHTTPServer", return_value=fake), \
-                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with self._mocked_serve() as (fake, out, _err):
                 rc = ds.main(["--root", str(root), "--port", "0"])
             self.assertEqual(rc, 0)
             fake.serve_forever.assert_called_once()
@@ -964,10 +978,7 @@ class MainEntrypointTests(unittest.TestCase):
             # A root with NO docs/spec-loop -> warning to stderr.
             root = Path(d) / "empty-root"
             root.mkdir()
-            fake = self._fake_server()
-            out, err = io.StringIO(), io.StringIO()
-            with mock.patch.object(ds, "ThreadingHTTPServer", return_value=fake), \
-                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with self._mocked_serve() as (_fake, _out, err):
                 rc = ds.main(["--root", str(root), "--port", "0"])
             self.assertEqual(rc, 0)
             self.assertIn("does not exist", err.getvalue())
@@ -980,13 +991,26 @@ class MainEntrypointTests(unittest.TestCase):
             prev = os.getcwd()
             os.chdir(d)
             try:
-                fake = self._fake_server()
-                out, err = io.StringIO(), io.StringIO()
-                with mock.patch.object(ds, "ThreadingHTTPServer", return_value=fake), \
-                        contextlib.redirect_stdout(out), \
-                        contextlib.redirect_stderr(err):
+                # Wrap the real build_server to capture the resolved root the
+                # default branch (raw_roots = ["."]) produced.
+                captured = {}
+                real_build = ds.build_server
+
+                def spy_build(root, *a, **kw):
+                    captured["root"] = root
+                    return real_build(root, *a, **kw)
+
+                with self._mocked_serve() as (_fake, out, _err), \
+                        mock.patch.object(ds, "build_server", side_effect=spy_build):
                     rc = ds.main(["--port", "0"])
                 self.assertEqual(rc, 0)
+                # The default root "." resolved to the current (tmp) cwd, not the
+                # live checkout — an observable effect of the default-root branch.
+                self.assertEqual(
+                    [os.path.realpath(r) for r in captured["root"]],
+                    [os.path.realpath(d)],
+                )
+                self.assertIn("serving 1 root(s)", out.getvalue())
             finally:
                 os.chdir(prev)
 
