@@ -1,5 +1,5 @@
 ---
-description: "Start-or-reuse the machine-wide read-only web dashboard (a modern dark-theme single-page UI over the run artifacts under docs/spec-loop/<run-id>/, aggregated across every repo you have launched from) via scripts/dashboard_launcher.py: Docker-preferred, python-fallback; mutates no run state and triggers no slice work. Pass --stop to tear the singleton down"
+description: "Start-or-reuse the machine-wide read-only web dashboard (a modern dark-theme single-page UI over the run artifacts under docs/spec-loop/<run-id>/, aggregated across every repo you have launched from) via the plugin-bundled dashboard_launcher.py: Docker-preferred, python-fallback; mutates no run state and triggers no slice work. Pass --stop to tear the singleton down"
 argument-hint: "[--stop]"
 allowed-tools: ["Bash"]
 ---
@@ -13,8 +13,10 @@ escalations, recent decisions), and near-real-time auto-refresh. Unlike the old 
 server, this is a **machine-wide singleton** that **aggregates the runs of every repo you launch
 it from** into one view — one container, one URL, all your sessions.
 
-This command **mutates no run state** and **triggers no slice work**. It runs
-`scripts/dashboard_launcher.py`, which prefers Docker and falls back to plain Python. The `Bash`
+This command **mutates no run state** and **triggers no slice work**. It runs the
+plugin-bundled `dashboard_launcher.py` (invoked by its absolute
+`${CLAUDE_PLUGIN_ROOT}` path so it works from any repo), which prefers Docker and falls
+back to plain Python. The `Bash`
 tool is now used to shell out to `docker` (dual-use: **build** the image on first run, **run** the
 detached container, and **stop** it via `--stop`) — that is the honest capability boundary here.
 Starting a container (or a foreground process) *is* a side effect; the read-only guarantee is about
@@ -24,10 +26,12 @@ your **run state**, which the dashboard physically cannot change: run artifacts 
 
 ## Steps
 
-1. **Start (or reuse) the dashboard.** Run, via `Bash`, from the repo whose runs you want included:
+1. **Start (or reuse) the dashboard.** Run, via `Bash`, **from the repo whose runs you want
+   included** (your current working directory selects the served repo; the launcher itself
+   is bundled in the plugin and is addressed by its absolute `${CLAUDE_PLUGIN_ROOT}` path):
 
    ```
-   python3 scripts/dashboard_launcher.py
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/dashboard_launcher.py"
    ```
 
    No `--port` flag exists — the singleton always publishes the fixed port `8787` on loopback.
@@ -39,12 +43,13 @@ your **run state**, which the dashboard physically cannot change: run artifacts 
      serving after the command returns.
    - **Docker absent, not installed, or daemon down → Python fallback.** It prints a clear
      one-line message on stderr saying it fell back and *why* (e.g. `docker unavailable (docker not
-     installed); falling back to a local foreground server`), then runs
-     `python3 scripts/dashboard_server.py --root .` **in the foreground**. This path is fully
+     installed); falling back to a local foreground server`), then runs the plugin-bundled
+     `dashboard_server.py --root <cwd>` **in the foreground**. This path is fully
      functional — it *is* the listener — and stays attached until you stop it with `Ctrl-C`.
 
    On the **very first Docker invocation**, the launcher builds the image
-   (`spec-loop-dashboard:local`) from the repo's `Dockerfile`; this can take tens of seconds. Later
+   (`spec-loop-dashboard:local`) from the plugin-bundled `Dockerfile` (its build context is the
+   plugin root, resolved from the launcher's own location); this can take tens of seconds. Later
    launches reuse the built image.
 
 2. **Open the printed URL.** Visit `http://127.0.0.1:8787/` in a browser. The page loads the
@@ -62,7 +67,7 @@ your **run state**, which the dashboard physically cannot change: run artifacts 
    (a refresh reconnects them to the same URL).
 
 4. **Stop the dashboard.**
-   - **Docker path:** run `python3 scripts/dashboard_launcher.py --stop`. This is scoped to the
+   - **Docker path:** run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/dashboard_launcher.py" --stop`. This is scoped to the
      singleton name **only** (`docker stop spec-loop-dashboard` then `docker rm spec-loop-dashboard`)
      — it never touches any other container and never uses an unscoped `rm -f`.
    - **Python-fallback path:** press `Ctrl-C` in the foreground terminal.

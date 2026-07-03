@@ -33,10 +33,11 @@ prior build. Pinned entries map to git tags `v<version>`.
   open escalations, recent decisions), with near-real-time auto-refresh (~2.5s polling +
   ETag/304) and a freshness indicator. Strictly read-only (`GET`/`HEAD` only, `127.0.0.1`
   bind, no mutation endpoints). Launch it with the new `/spec-loop:dashboard-serve`
-  command, which starts `scripts/dashboard_server.py` and prints the local URL.
+  command, which starts the plugin-bundled `dashboard_launcher.py` (Docker-preferred,
+  Python-fallback) and prints the local URL.
 - `/spec-loop:peer-review` — a strictly **read-only** multi-provider peer-review loop. It
   resolves a real pull request (GitHub / Azure DevOps / Bitbucket URL, or an explicit local
-  `--base/--head` ref-range) and materializes its diff read-only via `scripts/pr_resolver.py`,
+  `--base/--head` ref-range) and materializes its diff read-only via the plugin-bundled `pr_resolver.py`,
   then convenes five `peer-review-*` reviewers (`peer-review-conformance`, `-correctness`,
   `-design`, `-risk`, `-tests`) plus a report-only `pr-review-toolkit:review-pr` pass through
   the new `peer-review-council` skill, and publishes **one** pinned-schema report at
@@ -46,6 +47,16 @@ prior build. Pinned entries map to git tags `v<version>`.
   now machine-enforced: `scripts/validate_marketplace.py` asserts that any command marked
   read-only (including this one and the two dashboard commands) does not grant `Edit` in its
   `allowed-tools`.
+- **The dashboard and peer-review runtime now ships inside the plugin**, so
+  `/spec-loop:dashboard-serve` and `/spec-loop:peer-review` work on a marketplace install
+  (previously they invoked repo-root `scripts/…` by a relative path that did not exist for
+  installed users). The bundled `dashboard_launcher.py`, `dashboard_server.py`,
+  `pr_resolver.py`, `dashboard_assets/`, and `Dockerfile` live under
+  `plugins/spec-loop/scripts/` (and `plugins/spec-loop/Dockerfile`); the commands invoke
+  them by their absolute `${CLAUDE_PLUGIN_ROOT}` path, so they run from any working
+  directory. `scripts/validate_marketplace.py` now guards against regressions: it fails if a
+  command/skill/agent references a `${CLAUDE_PLUGIN_ROOT}/<path>` that is not shipped, or if
+  the plugin `Dockerfile` `COPY`s a source missing from the build context.
 
 ### Changed
 - **Single-branch integration is now the default and is hardened.** Every slice merges into

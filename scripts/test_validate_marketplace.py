@@ -893,5 +893,95 @@ class RealRepoTest(unittest.TestCase):
         self.assertTrue(ok, f"real repo must validate; errors: {v.errors}")
 
 
+# --------------------------------------------------------------------------
+# Bundled-dependency guard: a command/skill/agent that invokes a
+# ${CLAUDE_PLUGIN_ROOT}/<path> — or a plugin Dockerfile that COPYs a source —
+# must reference a file that actually ships inside the plugin. This is the guard
+# that would have caught the dashboard/resolver scripts going unshipped.
+# --------------------------------------------------------------------------
+
+def run_on_command_with_files(command_md: str, files: dict[str, str]):
+    """Validate a one-command plugin, first planting `files` (relpath -> content)
+    under the plugin dir. Returns (ok, errors)."""
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        write_plugin(root, command_md)
+        plugin_dir = root / "plugins" / "demo"
+        for rel, content in files.items():
+            dest = plugin_dir / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(content)
+        v = vm.Validator(root)
+        ok = v.run()
+        return ok, v.errors
+
+
+def _cmd_referencing(relpath: str) -> str:
+    return cmd(
+        description="a read-only command",
+        allowed_tools=["Bash"],
+        body=f'Run `python3 "${{CLAUDE_PLUGIN_ROOT}}/{relpath}"` to do the thing.',
+    )
+
+
+class BundledDependencyTest(unittest.TestCase):
+    def test_plugin_root_ref_to_missing_file_fails(self):
+        ok, errors = run_on_command(_cmd_referencing("scripts/ghost.py"))
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("not shipped" in e and "scripts/ghost.py" in e for e in errors),
+            f"a ${{CLAUDE_PLUGIN_ROOT}} ref to an unshipped file must fail; got: {errors}",
+        )
+
+    def test_plugin_root_ref_to_shipped_file_passes(self):
+        ok, errors = run_on_command_with_files(
+            _cmd_referencing("scripts/real.py"),
+            {"scripts/real.py": "print('hi')\n"},
+        )
+        self.assertTrue(ok, f"a shipped ref must pass; got: {errors}")
+
+    def test_plugin_root_ref_traversal_fails(self):
+        ok, errors = run_on_command(_cmd_referencing("../../etc/passwd"))
+        self.assertFalse(ok)
+        self.assertTrue(any("path traversal" in e for e in errors), errors)
+
+    def test_dockerfile_copy_missing_source_fails(self):
+        ok, errors = run_on_command_with_files(
+            cmd(description="d", allowed_tools=["Bash"], body="no refs here"),
+            {"Dockerfile": "FROM python:3.12-slim\nCOPY scripts/absent.py /app/x.py\n"},
+        )
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("COPY source" in e and "scripts/absent.py" in e for e in errors),
+            f"a Dockerfile COPY of a missing source must fail; got: {errors}",
+        )
+
+    def test_dockerfile_copy_present_source_passes(self):
+        ok, errors = run_on_command_with_files(
+            cmd(description="d", allowed_tools=["Bash"], body="no refs here"),
+            {
+                "Dockerfile": "FROM python:3.12-slim\nCOPY scripts/here.py /app/x.py\n",
+                "scripts/here.py": "print('hi')\n",
+            },
+        )
+        self.assertTrue(ok, f"a present COPY source must pass; got: {errors}")
+
+    def test_dockerfile_copy_from_stage_is_skipped(self):
+        # `COPY --from=<stage>` reads a build stage, not the context — not a
+        # shipped-file dependency, so it must NOT be flagged as missing.
+        ok, errors = run_on_command_with_files(
+            cmd(description="d", allowed_tools=["Bash"], body="no refs here"),
+            {"Dockerfile": "FROM python:3.12-slim AS b\n"
+                           "COPY --from=b /app/x /app/x\n"},
+        )
+        self.assertTrue(ok, f"COPY --from must be skipped; got: {errors}")
+
+    def test_copy_source_parser_extracts_sources_not_dest(self):
+        srcs = vm.Validator._dockerfile_copy_sources(
+            "FROM x\nCOPY a.py b.py dest/\nCOPY --from=s /p /q\nADD z.tar /\n"
+        )
+        self.assertEqual(srcs, ["a.py", "b.py"])
+
+
 if __name__ == "__main__":
     unittest.main()

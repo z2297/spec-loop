@@ -57,6 +57,17 @@ Optional, used only for high-risk (Tier 3) reviews: a plugin providing
 `/exhaustive-pr-review:exhaustive-pr`. If absent, the loop uses
 `pr-review-toolkit:review-pr all parallel` instead.
 
+**Runtime tooling for the auxiliary commands** (the core loop needs none of this —
+its worktrees run on the host). These scripts ship *inside* the plugin and are
+invoked by their `${CLAUDE_PLUGIN_ROOT}` path, so they work from any repo:
+
+- `/spec-loop:dashboard-serve` needs **Python 3**. **Docker** is optional — with a
+  daemon it runs a detached, read-only, loopback-only singleton container built from
+  the bundled `Dockerfile`; without one it falls back to a foreground Python server.
+- `/spec-loop:peer-review` needs **Python 3** plus the provider CLI for the PR host
+  you point it at — `gh` (GitHub), `az` (Azure DevOps), or `git` for a local
+  `--base/--head` ref-range.
+
 ## Install
 
 **From a marketplace (recommended):**

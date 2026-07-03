@@ -54,6 +54,14 @@ from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 OMIT_FILE = SCRIPTS_DIR / "coverage_omit.txt"
+# The shippable runtime scripts (dashboard_*, pr_resolver) and their tests were
+# relocated INTO the plugin so a marketplace install is self-contained; the dev/CI
+# tools (this file, release.py, validate_marketplace.py) stay here. Both dirs are
+# named ``scripts`` so ``normalize_key`` canonicalizes either location to a single
+# ``scripts/<name>.py`` key — the target/floor/OMIT keys are unchanged by the move.
+PLUGIN_SCRIPTS_DIR = SCRIPTS_DIR.parent / "plugins" / "spec-loop" / "scripts"
+# Every dir the tool imports targets from and discovers tests in (root first).
+MEASURED_DIRS = (SCRIPTS_DIR, PLUGIN_SCRIPTS_DIR)
 
 # Recursion guard. This tool runs the whole scripts/test_*.py suite under trace —
 # which includes test_measure_coverage's seam test, and that test invokes this tool
@@ -316,18 +324,29 @@ def _reimport_targets() -> None:
     freshly-traced object left in ``sys.modules`` (single module identity), keeping
     every ``mock.patch`` site aimed at the object the suite actually exercises.
     """
-    if str(SCRIPTS_DIR) not in sys.path:
-        sys.path.insert(0, str(SCRIPTS_DIR))
+    for measured in MEASURED_DIRS:
+        if str(measured) not in sys.path:
+            sys.path.insert(0, str(measured))
     for name in TARGET_MODULES:
         sys.modules.pop(name, None)
         importlib.import_module(name)
 
 
 def _discover_suite() -> unittest.TestSuite:
-    """Discover the same suite CI runs: scripts/test_*.py."""
-    return unittest.TestLoader().discover(
-        str(SCRIPTS_DIR), pattern="test_*.py", top_level_dir=str(SCRIPTS_DIR)
-    )
+    """Discover the same suite CI runs: ``test_*.py`` across every measured dir.
+
+    The runtime tests now live beside their targets in the plugin scripts dir and
+    the dev/CI tests stay here, so the suite spans both dirs. Each dir is its own
+    ``top_level_dir`` (both are on ``sys.path`` from ``_reimport_targets``); the
+    test module basenames are disjoint across dirs, so there is no import clash.
+    """
+    loader = unittest.TestLoader()
+    suite = unittest.TestSuite()
+    for measured in MEASURED_DIRS:
+        suite.addTests(loader.discover(
+            str(measured), pattern="test_*.py", top_level_dir=str(measured)
+        ))
+    return suite
 
 
 def _run_under_trace() -> tuple[bool, int, dict]:
@@ -366,6 +385,22 @@ def _run_under_trace() -> tuple[bool, int, dict]:
     return result.wasSuccessful(), result.testsRun, results.counts
 
 
+def _target_source_path(relpath: str) -> Path:
+    """Locate a target's source file across the measured dirs by basename.
+
+    A target key is canonical (``scripts/<name>.py``) but the file itself now
+    lives in either the root ``scripts/`` (dev/CI tools) or the plugin
+    ``scripts/`` (shipped runtime). Basenames are disjoint across the two dirs,
+    so the first existing match is unambiguous.
+    """
+    name = Path(relpath).name
+    for measured in MEASURED_DIRS:
+        candidate = measured / name
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"target source not found in {MEASURED_DIRS}: {relpath}")
+
+
 def _build_stats(counts: dict) -> dict[str, FileStat]:
     """Turn trace counts + source into per-target FileStat, minus OMIT."""
     omit = parse_omit(OMIT_FILE.read_text())
@@ -379,7 +414,7 @@ def _build_stats(counts: dict) -> dict[str, FileStat]:
 
     stats: dict[str, FileStat] = {}
     for relpath in TARGET_FILES:
-        source = (SCRIPTS_DIR.parent / relpath).read_text()
+        source = _target_source_path(relpath).read_text()
         executable = executable_lines(source, relpath)
         run = executed[relpath] & executable
         file_omit = omit.get(relpath, set())

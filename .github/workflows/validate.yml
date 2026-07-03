@@ -19,7 +19,12 @@ jobs:
         run: python3 scripts/validate_marketplace.py .
 
       - name: Python unittest suite
-        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+        # The suite spans two dirs: dev/CI tools in scripts/, and the shipped
+        # runtime (dashboard_*, pr_resolver) + their tests relocated into the
+        # plugin so a marketplace install is self-contained. Discover both.
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_*.py'
+          python3 -m unittest discover -s plugins/spec-loop/scripts -p 'test_*.py'
 
       - name: Coverage floor gate (stdlib trace, no-regression)
         # Per-file + total floors live in scripts/measure_coverage.py, set BELOW the
@@ -43,7 +48,7 @@ jobs:
         # --experimental-test-coverage is report-only (no per-metric threshold
         # flags), so we surface the report and gate on test success + count instead.
         run: |
-          out=$(node --test --experimental-test-coverage scripts/dashboard_assets/index.test.mjs 2>&1)
+          out=$(node --test --experimental-test-coverage plugins/spec-loop/scripts/dashboard_assets/index.test.mjs 2>&1)
           rc=$?
           echo "$out"
           if [ "$rc" -ne 0 ]; then

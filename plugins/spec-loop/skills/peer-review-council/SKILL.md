@@ -38,9 +38,10 @@ decision-routing concerns and are explicitly out of scope (see *Read-only discip
 
 The controller hands this procedure exactly two things.
 
-### 1. The resolved diff / target — from `scripts/pr_resolver.py`
+### 1. The resolved diff / target — from the plugin-bundled `pr_resolver.py`
 
-`scripts/pr_resolver.py` resolves a PR URL (GitHub / Azure DevOps / Bitbucket) or an
+The plugin-bundled `pr_resolver.py` (invoked by the controller via its
+`${CLAUDE_PLUGIN_ROOT}` path) resolves a PR URL (GitHub / Azure DevOps / Bitbucket) or an
 explicit local `--base/--head` ref-range READ-ONLY to a **normalized record** and emits
 it as JSON. The record has exactly these 10 fields (its stable inter-slice contract,
 built in one place — `_normalized()`):

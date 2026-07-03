@@ -17,12 +17,15 @@
 #      loop plus its KeyboardInterrupt/finally shutdown cannot run to completion
 #      inside a unit test (it would block forever), so those lines never execute.
 #
-# Line numbers verified against source on 2026-07-01; re-verify if these files move.
+# Line numbers verified against source on 2026-07-02; re-verify if these files move.
+# The dashboard_*/pr_resolver files now live in plugins/spec-loop/scripts/ (moved
+# verbatim, so their line numbers are unchanged); the keys stay scripts/<name>.py
+# because measure_coverage.normalize_key canonicalizes either scripts/ dir.
 
 scripts/dashboard_launcher.py:551-552    # __main__ entry shim (if __name__/sys.exit(main())); not run as __main__ under unittest
 scripts/dashboard_server.py:663-664      # __main__ entry shim (if __name__/sys.exit(main())); not run as __main__ under unittest
 scripts/pr_resolver.py:488-489           # __main__ entry shim (if __name__/sys.exit(main())); not run as __main__ under unittest
 scripts/release.py:194-195               # __main__ entry shim (if __name__/sys.exit(main())); not run as __main__ under unittest
-scripts/validate_marketplace.py:313-314  # __main__ entry shim (if __name__/sys.exit(main())); not run as __main__ under unittest
+scripts/validate_marketplace.py:385-386  # __main__ entry shim (if __name__/sys.exit(main())); not run as __main__ under unittest
 
 scripts/dashboard_server.py:654-659      # blocking serve_forever() try/except KeyboardInterrupt/finally daemon tail; cannot run to completion under a unit test

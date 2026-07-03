@@ -78,20 +78,21 @@ autonomy contract, the Iron Council, components, and limitations.
 ├── .github/workflows/
 │   ├── validate.yml         # CI gate (runs on PRs + pushes to main/beta/alpha)
 │   └── release.yml          # one-button release (workflow_dispatch)
-├── scripts/
-│   ├── validate_marketplace.py       # self-contained manifest validator (+ read-only command contract)
+├── scripts/                          # dev/CI tooling only (NOT shipped in the plugin)
+│   ├── validate_marketplace.py       # self-contained manifest validator (+ read-only command & bundled-dependency contracts)
 │   ├── test_validate_marketplace.py  # unittest suite for the marketplace validator
-│   ├── release.py                    # release helper (bump + archive + changelog)
-│   ├── dashboard_server.py           # read-only stdlib http.server + run-scan/JSON data layer
-│   ├── test_dashboard_server.py      # unittest suite for the dashboard server
-│   └── dashboard_assets/             # self-contained dark-theme web dashboard (index.html)
+│   ├── measure_coverage.py           # stdlib coverage-floor gate (spans root + plugin scripts)
+│   └── release.py                    # release helper (bump + archive + changelog)
 ├── CHANGELOG.md             # version history + channel reference
 ├── plugins/
-│   └── spec-loop/           # the plugin
+│   └── spec-loop/           # the plugin (this whole dir is what ships)
 │       ├── .claude-plugin/plugin.json
 │       ├── commands/        # /spec-loop controller, /spec-loop:quality-gate config, /spec-loop:dashboard terminal view, /spec-loop:dashboard-serve web view, /spec-loop:peer-review read-only PR review
 │       ├── agents/          # spec-loop-slice worker + 5 iron-council members + 5 peer-review-* reviewers
 │       ├── skills/          # iron-council, escalation-gate, review-depth-map, quality-gate, peer-review-council
+│       ├── scripts/         # bundled runtime: dashboard_launcher.py, dashboard_server.py, pr_resolver.py, dashboard_assets/ (+ their tests)
+│       ├── Dockerfile       # read-only dashboard image (built by dashboard_launcher.py)
+│       ├── .dockerignore
 │       └── README.md
 ├── LICENSE
 └── README.md
@@ -127,14 +128,16 @@ After that, a red `validate` check blocks the merge.
 Coverage is enforced in CI with **standard-library tooling only** — no `coverage.py`,
 no third-party deps, deterministic and no-Docker.
 
-- **Python** (`scripts/*.py`): `scripts/measure_coverage.py` runs the full
-  `unittest` suite in-process under the stdlib [`trace`](https://docs.python.org/3/library/trace.html)
-  module. Executed lines come from `trace`; the executable-line denominator comes
-  from `code.co_lines()` (bytecode-derived, not a regex). Inside the tracer it
-  re-imports the target modules and *then* discovers the suite, so import-time-only
-  lines (module constants, `def`/`class` headers, decorators) are counted while the
-  discovered tests still `mock.patch` the same module objects.
-- **Client JS** (`scripts/dashboard_assets/*.mjs`): `node --test
+- **Python** (`scripts/*.py` + `plugins/spec-loop/scripts/*.py`):
+  `scripts/measure_coverage.py` runs the full `unittest` suite in-process under the
+  stdlib [`trace`](https://docs.python.org/3/library/trace.html) module, spanning both
+  the root dev/CI scripts and the plugin's bundled runtime scripts. Executed lines come
+  from `trace`; the executable-line denominator comes from `code.co_lines()`
+  (bytecode-derived, not a regex). Inside the tracer it re-imports the target modules and
+  *then* discovers the suite, so import-time-only lines (module constants, `def`/`class`
+  headers, decorators) are counted while the discovered tests still `mock.patch` the same
+  module objects.
+- **Client JS** (`plugins/spec-loop/scripts/dashboard_assets/*.mjs`): `node --test
   --experimental-test-coverage`. Node's coverage output is report-only (no
   per-metric threshold flags on Node 20), so the JS gate enforces test *success*
   plus a minimum test count rather than a coverage number.
@@ -159,7 +162,7 @@ runaway OMIT.
 
 ```
 python3 scripts/measure_coverage.py
-node --test --experimental-test-coverage scripts/dashboard_assets/index.test.mjs
+node --test --experimental-test-coverage plugins/spec-loop/scripts/dashboard_assets/index.test.mjs
 ```
 
 ## Channels & release model
