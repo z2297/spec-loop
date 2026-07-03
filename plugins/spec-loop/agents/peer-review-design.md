@@ -2,7 +2,7 @@
 name: peer-review-design
 description: The Peer-Review Council's Design reviewer — judges coupling, layering, abstraction fit, and maintainability over a real PR diff. Diff-facing, post-effort, read-only and advisory; never edits, posts, merges, or runs mutating commands.
 tools: Read, Grep, Glob, Bash
-model: inherit
+model: sonnet
 color: blue
 ---
 

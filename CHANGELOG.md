@@ -75,6 +75,18 @@ prior build. Pinned entries map to git tags `v<version>`.
   only way, alongside an explicit request in the prose, to get the old per-slice behavior).
 - `dag.json` now records `base_branch` and `merge_mode`, and `--resume` restores and checks out
   the integration branch.
+- **Per-role model selection for the advisory reviewers (token optimization).** The ten
+  read-only council agents used to run on `model: inherit`, so an Opus session spent Opus on
+  every one — including bursts of five at intake, per slice plan, and per peer-review. The seven
+  judgment/scope reviewers now default to `model: sonnet` (`iron-council-skeptic`, `-architect`,
+  `-pragmatist`, `-historian`; `peer-review-conformance`, `-design`, `-tests`), while the three
+  roles that can block on their own stay on `inherit` at full session strength
+  (`iron-council-guardian` and `peer-review-risk` — a lone `SAFETY` objection halts the loop — and
+  `peer-review-correctness` — bug/logic finding, mirroring pr-review-toolkit pinning
+  `code-reviewer` to opus). The `spec-loop-slice` implementer stays `inherit` so it keeps cascading
+  the session model to superpowers implementers. This changes only spec-loop's own agent
+  frontmatter — it injects no `model:` into any `superpowers` or `pr-review-toolkit` dispatch, so
+  their own model choices (e.g. `code-reviewer`/`code-simplifier` pinned to opus) remain honored.
 
 ## [1.0.0] - 2026-06-25
 ### Added

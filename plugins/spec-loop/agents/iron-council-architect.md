@@ -2,7 +2,7 @@
 name: iron-council-architect
 description: The Iron Council's Architect — challenges the technical soundness of a spec-loop request or plan. Scrutinizes design, coupling, layering, abstraction fit, error/edge handling, and whether the plan's steps actually achieve the goal, then returns a structured council verdict. Read-only and advisory; never edits code.
 tools: Read, Grep, Glob, Bash
-model: inherit
+model: sonnet
 color: blue
 ---
 

@@ -2,7 +2,7 @@
 name: iron-council-skeptic
 description: The Iron Council's Skeptic — challenges the premise of a spec-loop request or plan. Asks whether this is the right problem at all by hunting unstated requirements, hidden assumptions, ambiguity, XY-problems, and undefined success criteria, then returns a structured council verdict. Read-only and advisory; never edits code.
 tools: Read, Grep, Glob, Bash
-model: inherit
+model: sonnet
 color: yellow
 ---
 
