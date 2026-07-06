@@ -302,6 +302,7 @@ re-prompted — update it anytime with:
 | skill   | `review-depth-map`| Maps a plan's risk tier to how far `review-pr` goes |
 | skill   | `quality-gate`    | Measures changed code vs thresholds; drives the behavior-preserving refactor loop |
 | skill   | `peer-review-council` | Convenes the five `peer-review-*` reviewers + a report-only `pr-review-toolkit` pass and aggregates them into one pinned-schema, report-only review (no fixes, no write-back) |
+| skill   | `runbook`         | At the end of Phase 5 (gate green, before publishing) synthesizes and commits one `docs/spec-loop/<run-id>/runbook.md` from the run's durable artifacts — a self-contained Executive Readout + What Was Built, Business Logic, Gaps, requirement traceability, decisions summary, integration-gate result, and how-to-verify — and returns the Executive Readout as the run's final terminal output |
 
 ## Notes & limitations
 

@@ -37,6 +37,11 @@ because you are the only layer that can interactively ask the human anything.
   slice must clear before merge. Its thresholds live in the global config at
   `~/.claude/spec-loop/quality-gate.json`; you ensure that config exists (Phase 0)
   and pass its path to every slice.
+- **REQUIRED SUB-SKILL:** `runbook` runs once at the end of Phase 5 — after the
+  integration gate is green and **before** the publish prompt. It synthesizes one
+  `docs/spec-loop/<run-id>/runbook.md` from the run's durable artifacts (which you then
+  commit) and returns the **Executive Readout** that becomes the run's final terminal
+  output.
 - This loop **intentionally overrides** the human gates in `brainstorming` and
   `subagent-driven-development`. It does NOT override
   `superpowers:verification-before-completion`.
@@ -282,10 +287,45 @@ verified the slices **together**. This phase does, before the run is called comp
    untouched for the human to merge. (Single-branch merge is the primary path; this
    is only for the explicitly-requested per-slice-PR mode.)
 
-5. **Publish prompt (single-branch mode) — the run's final interaction.** When steps
-   1–3 are green, all the work sits on the singular local integration branch,
-   unpushed, with `main`/`master` untouched. Ask the human via **one
-   `AskUserQuestion`** how to publish it (recommended option first):
+5. **Generate and commit the RUNBOOK (before publishing).** Steps 1–3 are green and
+   every slice sits on `base_ref`. Before asking how to publish, invoke the `runbook`
+   skill, passing it: the `run-id`, the absolute path to `docs/spec-loop/<run-id>/`, the
+   resolved `base_ref`/`base_sha`/`base_branch`/`merge_mode`, and the Phase 5 result
+   (suite command + outcome, cross-slice `review-pr` verdict + tier, and the ids of any
+   remediation slices). It writes `docs/spec-loop/<run-id>/runbook.md` and **returns the
+   Executive Readout** for you to print at the very end. Then commit the **whole run-state
+   directory** onto the integration branch so the runbook and its audit trail travel with
+   any push/merge:
+
+   ```
+   git add -- docs/spec-loop/<run-id>/
+   git status --short        # verify ONLY docs/spec-loop/<run-id>/ is staged
+   git commit -m "docs(spec-loop): runbook + run state for <run-id>"
+   ```
+
+   **COMMIT-SAFETY (critical).** The run-state artifacts (`dag.json`, `decisions-log.md`,
+   `escalations.md`, `slice-*.md`, `runbook.md`) are **untracked but NOT gitignored**.
+   **Never** use `git add -A`, `git add .`, or a broader pathspec here — any of those would
+   sweep unrelated working-tree changes into this commit. Stage **only** the run directory
+   by its explicit pathspec (`git add -- docs/spec-loop/<run-id>/`), then confirm with
+   `git status --short` that nothing outside that directory is staged. If anything
+   unexpected is staged, run `escalation-gate` (material assumption / cannot proceed safely)
+   rather than forcing the commit. Rationale for committing **before** the publish prompt:
+   the runbook + audit trail then ride along with whatever the human chooses in step 6 — a
+   post-publish commit would strand them on a local-only commit for the push case, or need a
+   second `main` commit for the merge case.
+
+   *(In `per-slice-pr` mode there is no single integration branch. Generate the runbook the
+   same way — its source artifacts are complete regardless of merge mode — and commit the
+   run directory onto the **current** branch (the `base_branch` checked out in Phase 0),
+   with the same single-pathspec add. Set the runbook's `publish` field to `per-slice-prs`
+   and record the throwaway-integration-branch result + the PR list in §6. Never commit the
+   run directory into an individual slice's PR branch.)*
+
+6. **Publish prompt (single-branch mode) — the run's final interaction.** With the runbook
+   committed, all the work sits on the singular local integration branch, unpushed, with
+   `main`/`master` untouched. Ask the human via **one `AskUserQuestion`** how to publish it
+   (recommended option first):
    1. **Push as a feature branch** — push the integration branch to the remote,
       optionally opening a PR.
    2. **Merge onto `main`** — locally `git checkout main && git merge --no-ff
@@ -295,14 +335,14 @@ verified the slices **together**. This phase does, before the run is called comp
    explicit choice. *(In `per-slice-pr` mode the PRs are already open: skip this
    prompt and just report the PR list.)*
 
-When Phase 5 is green and the publish choice is handled, produce the **final summary**:
-- Slices completed, each with its merge commit on the integration branch (or its PR
-  in `per-slice-pr` mode; note any `split` parents and their children).
-- The integration branch name and how it was published (pushed as a feature branch /
-  merged onto `main` / left local).
-- The `decisions-log.md` (auto-decisions made on the human's behalf, including splits).
-- Integration gate result (suite + cross-slice review; any remediation slices added).
-- Any slices that remain blocked and why.
+When Phase 5 is green, the runbook committed (step 5), and the publish choice handled
+(step 6), the run's **final terminal output IS the Executive Readout** returned by the
+`runbook` skill — print it **verbatim**, then append one line stating how the branch was
+published (pushed as a feature branch / merged onto `main` / left local / PR list). Do not
+compose a separate hand-written summary: the committed `docs/spec-loop/<run-id>/runbook.md`
+is the single source of truth, and its Executive Readout is the self-contained top section;
+the full detail (What Was Built, Business Logic, Gaps, requirement traceability, decisions,
+integration-gate result) lives in that file.
 
 ## Resume
 
@@ -312,7 +352,11 @@ controller resumes on the singular branch (clean-tree guard as in Phase 1). Skip
 terminal slices (`complete` and `split` parents), drain any `ANSWERED` escalations
 into re-dispatches, and continue from the first wave that has runnable slices. If
 every slice is already terminal, go straight to the Phase 5 integration gate — which
-ends with the publish prompt — before declaring the run done.
+generates + commits the runbook (step 5) then ends with the publish prompt — before
+declaring the run done. On resume, step 5 still applies: if `runbook.md` already exists
+for this run-id (an earlier interrupted finish), **regenerate** it (the artifacts are the
+source of truth) and re-stage the run directory; if `git status --short` shows nothing to
+commit (content unchanged), skip the empty commit and proceed to the publish prompt.
 
 ## Guardrails
 - Never dispatch two implementer-level agents that touch the same files
@@ -323,4 +367,8 @@ ends with the publish prompt — before declaring the run done.
   unless `--per-slice-pr` (flag or explicit request) is set — the controller owns the
   single-branch integration and merges slice branches serially.
 - Never push the integration branch or merge onto `main` without the human's explicit
-  publish choice (Phase 5.5).
+  publish choice (Phase 5, step 6).
+- Never stage the runbook commit with `git add -A`/`git add .`/a broad pathspec — the
+  run-state artifacts are untracked-not-ignored, so stage ONLY the run directory
+  (`git add -- docs/spec-loop/<run-id>/`) and verify with `git status --short` (Phase 5,
+  step 5).

@@ -23,6 +23,18 @@ prior build. Pinned entries map to git tags `v<version>`.
 
 ## [Unreleased]
 ### Added
+- `runbook` skill — at the end of a `/spec-loop` run, after the Phase 5 integration gate is
+  green and just before the publish prompt, the controller synthesizes one committed
+  `docs/spec-loop/<run-id>/runbook.md` from the run's durable artifacts (`dag.json`,
+  `decisions-log.md`, `escalations.md`, `slice-*-report.md`): a self-contained **Executive
+  Readout** plus What Was Built, Business Logic, Gaps/Deferred, requirement traceability, a
+  decisions summary, the integration-gate result, and how-to-verify/operate. The runbook and
+  its full run-state audit trail are committed onto the integration branch (staged by an
+  explicit single-directory pathspec — never `git add -A` — because the run artifacts are
+  untracked-not-ignored) **before** the publish prompt, so they travel with any push/merge;
+  the Executive Readout is then printed verbatim as the run's final terminal output, replacing
+  the previous ephemeral hand-written summary. The web dashboard's per-run scan now reports a
+  read-only `has_runbook` flag.
 - `/spec-loop:dashboard` — a read-only slash command that renders a terminal-markdown
   dashboard of a spec-loop run (DAG, derived waves, per-slice status, open escalations,
   recent decisions) from the durable artifacts under `docs/spec-loop/<run-id>/`. Mutates

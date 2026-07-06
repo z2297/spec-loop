@@ -187,6 +187,7 @@ def _scan_one_run(run_dir):
         "request_excerpt": _request_excerpt(run_dir),
         "decisions_tail": _decisions_tail(run_dir),
         "counts": _count_labels(enriched),
+        "has_runbook": (run_dir / "runbook.md").is_file(),
     }
 
 

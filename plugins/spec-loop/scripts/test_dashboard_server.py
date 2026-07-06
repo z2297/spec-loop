@@ -76,6 +76,7 @@ def build_fixture(tmp: Path) -> Path:
         "[intake] line one\n[s1] line two\n[s2] line three\n"
     )
     (docs / "run-normal" / "slice-s1-report.md").write_text("done")
+    (docs / "run-normal" / "runbook.md").write_text("# RUNBOOK\n\n## Executive Readout\n")
 
     # --- split run: split parent + its <parent>.N children ---
     write_dag(docs / "run-split", [
@@ -210,6 +211,12 @@ class ScanRunsTests(unittest.TestCase):
         reports = {s["id"]: s["has_report"] for s in run["slices"]}
         self.assertTrue(reports["s1"])
         self.assertFalse(reports["s2"])
+
+    def test_runbook_presence_detected(self):
+        runs = self.runs_by_id()
+        # run-normal has a runbook.md; run-split has none.
+        self.assertTrue(runs["run-normal"]["has_runbook"])
+        self.assertFalse(runs["run-split"]["has_runbook"])
 
     def test_request_excerpt_skips_heading(self):
         run = self.runs_by_id()["run-normal"]
