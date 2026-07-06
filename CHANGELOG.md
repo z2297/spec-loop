@@ -23,6 +23,23 @@ prior build. Pinned entries map to git tags `v<version>`.
 
 ## [Unreleased]
 ### Added
+- **Stage-aware dashboard.** The run-detail view (both the `/spec-loop:dashboard` terminal
+  view and the `/spec-loop:dashboard-serve` web SPA) now presents a run as a **pipeline of
+  stages** — Iron Council → Execution → Final Review — with a specific view per stage and a
+  persistent **Escalations** panel:
+  - **Iron Council** — the council findings parsed from `decisions-log.md` (intake + per-slice
+    verdicts: ENDORSE / ENDORSE_WITH_CONCERNS / OBJECT, with scope + summary).
+  - **Execution** — the existing per-slice DAG view (waves, slice table now with a per-slice
+    report marker, status rollup, recent decisions).
+  - **Final Review** — an executive dashboard synthesized from the committed `runbook.md`
+    (front-matter chips + the self-contained Executive Readout).
+  - **Escalations** — a static, always-shown panel listing **every** escalation (open +
+    answered) with its OPEN/ANSWERED status.
+  The web SPA marks the run's current derived stage in a clickable pipeline strip and switches
+  stage views without a refetch (`#run/<id>/<stage>` routing). Stages, council findings, and
+  the runbook are **derived from cold artifacts** — the dashboard stays strictly read-only and
+  never claims a slice/council is "running right now." New read-only `/api/runs[/…]` fields:
+  `stage`, `council`, `escalations` (all, with status), `runbook`, and `artifacts`.
 - `runbook` skill — at the end of a `/spec-loop` run, after the Phase 5 integration gate is
   green and just before the publish prompt, the controller synthesizes one committed
   `docs/spec-loop/<run-id>/runbook.md` from the run's durable artifacts (`dag.json`,

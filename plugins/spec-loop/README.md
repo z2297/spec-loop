@@ -283,8 +283,8 @@ re-prompted — update it anytime with:
 |---------|-------------------|------|
 | command | `spec-loop`       | Controller — decompose, schedule waves, ingest splits, run the integration gate, surface batched escalations |
 | command | `quality-gate`    | View/update the global code-quality gate config (`/spec-loop:quality-gate`) |
-| command | `dashboard`       | Read-only terminal-markdown view of a run — DAG, derived waves, slice status, escalations, decisions (`/spec-loop:dashboard [run-id]`) |
-| command | `dashboard-serve` | Start a local read-only **web** dashboard — a dark-theme single-page UI (overview + drill-down, auto-refresh) over the same run artifacts (`/spec-loop:dashboard-serve [--port N] [--root PATH]`) |
+| command | `dashboard`       | Read-only terminal-markdown view of a run — **stage-aware** (Iron Council findings, per-slice execution DAG, final-review Executive Readout) with a static all-status escalations section (`/spec-loop:dashboard [run-id]`) |
+| command | `dashboard-serve` | Start a local read-only **web** dashboard — a dark-theme single-page UI whose run detail is a **stage pipeline** (Iron Council → Execution → Final Review) with a specific view per stage and a pinned escalations panel, over the same run artifacts (`/spec-loop:dashboard-serve [--port N] [--root PATH]`) |
 | command | `peer-review`     | Strictly read-only multi-provider peer-review loop — resolve a real PR (GitHub/Azure DevOps/Bitbucket URL or local `--base/--head`), convene the five `peer-review-*` reviewers + a report-only `pr-review-toolkit` pass via `peer-review-council`, and publish one report under `docs/pr-review/<review-id>/`; never edits, merges, or posts (`/spec-loop:peer-review <requirements> --pr <url>`) |
 | agent   | `spec-loop-slice` | Per-slice worker — creates a clean dedicated worktree up front, then plan→council→(split if too big)→execute→review→quality-gate→verify, and hands the committed branch back to the controller to integrate (opens its own PR only in `--per-slice-pr` mode) |
 | agent   | `peer-review-conformance` | Peer-review reviewer — judges the diff against the supplied business requirements |

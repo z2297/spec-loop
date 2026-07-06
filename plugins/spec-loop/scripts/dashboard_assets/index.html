@@ -92,6 +92,48 @@
     }
     .esc .token { color: var(--bad); font-weight: 600; }
     .esc .token.intake { color: var(--warn); }
+    .esc .status { font-size: 0.7rem; letter-spacing: 0.04em; }
+    .esc .status.st-open { color: var(--bad); }
+    .esc .status.st-answered { color: var(--ok); }
+    .esc .status.st-unknown { color: var(--muted); }
+
+    /* stage pipeline strip */
+    .stages {
+      display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 0 0 1.25rem;
+    }
+    .stage {
+      padding: 0.35rem 0.8rem; border-radius: 999px; cursor: pointer;
+      border: 1px solid var(--border); color: var(--muted); font-size: 0.8rem;
+      white-space: nowrap;
+    }
+    .stage:hover { border-color: var(--accent); }
+    .stage.active { color: var(--fg); border-color: var(--accent); background: var(--panel-2); }
+    .stage.current { box-shadow: 0 0 0 1px var(--ok) inset; }
+    .stage.current::after { content: " ·live"; color: var(--ok); font-size: 0.7rem; }
+
+    /* iron-council findings */
+    .finding {
+      background: var(--panel-2); border-left: 3px solid var(--border);
+      border-radius: 4px; padding: 0.5rem 0.7rem; margin-bottom: 0.5rem;
+    }
+    .finding .scope { color: var(--muted); font-weight: 600; }
+    .finding-summary { color: var(--fg); opacity: 0.85; margin-top: 0.3rem; white-space: pre-wrap; }
+    .v-endorse  { color: var(--ok);  border-color: var(--ok); }
+    .v-ewc      { color: var(--warn); border-color: var(--warn); }
+    .v-object   { color: var(--bad);  border-color: var(--bad); }
+    .v-unknown  { color: var(--neutral); border-color: var(--neutral); }
+
+    /* final-review executive chips + readout */
+    .chips { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.8rem; }
+    .chip {
+      padding: 0.15rem 0.6rem; border-radius: 6px; font-size: 0.75rem;
+      border: 1px solid var(--border); color: var(--fg); background: var(--panel-2);
+    }
+    .readout {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+      padding: 0.9rem; white-space: pre-wrap; word-break: break-word;
+      color: var(--fg); font-size: 0.82rem; margin: 0;
+    }
 
     .decisions { margin: 0; padding: 0; list-style: none; }
     .decisions li {
@@ -152,6 +194,32 @@
         ? LABEL_CLASS[label] : "lbl-unknown";
     }
 
+    // Stage pipeline: fixed order + display labels. "preflight" is intentionally
+    // absent — a run isn't listed until dag.json exists, so it has no view.
+    const STAGE_ORDER = ["iron-council", "execution", "final-review"];
+    const STAGE_LABELS = {
+      "iron-council": "① Iron Council",
+      "execution": "② Execution",
+      "final-review": "③ Final Review",
+    };
+
+    // Fixed allowlists (same hasOwnProperty guard as labelClass): council verdict
+    // and escalation status -> known CSS class; anything unexpected falls back.
+    const VERDICT_CLASS = {
+      "ENDORSE": "v-endorse",
+      "ENDORSE_WITH_CONCERNS": "v-ewc",
+      "OBJECT": "v-object",
+    };
+    function verdictClass(v) {
+      return Object.prototype.hasOwnProperty.call(VERDICT_CLASS, v)
+        ? VERDICT_CLASS[v] : "v-unknown";
+    }
+    const STATUS_CLASS = { "OPEN": "st-open", "ANSWERED": "st-answered" };
+    function statusClass(s) {
+      return Object.prototype.hasOwnProperty.call(STATUS_CLASS, s)
+        ? STATUS_CLASS[s] : "st-unknown";
+    }
+
     // ---- environment probe -------------------------------------------------
     // True in a real browser, false when this script is loaded under Node for
     // testing (no document/window). Every top-level side effect that touches a
@@ -176,9 +244,12 @@
     const $freshText = HAS_DOM ? document.getElementById("fresh-text") : null;
 
     // ---- app state --------------------------------------------------------
-    // view: {kind:"overview"} | {kind:"detail", runId}
-    // Node-safe default: parseHash() reads location.hash, absent under Node.
+    // view: {kind:"overview"} | {kind:"detail", runId, stage}
+    // stage is null unless the hash pins one (#run/<id>/<stage>); null means
+    // "use the run's current derived stage". Node-safe default: parseHash() reads
+    // location.hash, absent under Node.
     let view = HAS_DOM ? parseHash() : { kind: "overview" };
+    let lastData = null;       // last painted payload — lets a stage switch re-render without a refetch
     let timer = null;          // the single re-armed poll timer
     let goneTimer = null;      // deferred "run gone → overview" nav, cancellable
     let viewGen = 0;           // bumped on every view entry; stale in-flight polls are dropped
@@ -208,8 +279,13 @@
     function parseHashFrom(hash) {
       const h = (hash || "").replace(/^#/, "");
       if (h.startsWith("run/")) {
-        const id = decodeURIComponent(h.slice("run/".length));
-        if (id) return { kind: "detail", runId: id };
+        const rest = h.slice("run/".length);
+        // A run-id may contain ':' (root namespacing) but never '/', so the FIRST
+        // '/' after "run/" separates the (encoded) id from an optional stage.
+        const slash = rest.indexOf("/");
+        const id = decodeURIComponent(slash === -1 ? rest : rest.slice(0, slash));
+        const stage = slash === -1 ? null : (decodeURIComponent(rest.slice(slash + 1)) || null);
+        if (id) return { kind: "detail", runId: id, stage: stage };
       }
       return { kind: "overview" };
     }
@@ -316,7 +392,9 @@
       return card;
     }
 
-    // ---- detail render ----------------------------------------------------
+    // ---- detail render (stage-aware) --------------------------------------
+    // Layout: header -> stage pipeline strip -> the active stage's view ->
+    // the static Escalations panel (always shown, regardless of stage).
     function renderDetail(run) {
       $view.className = "";
       $view.textContent = "";
@@ -324,12 +402,33 @@
         $view.appendChild(transientCard((run && run.run_id) || view.runId));
         return;
       }
+      const activeStage = view.stage || run.stage || "execution";
       $view.appendChild(detailHeader(run));
-      $view.appendChild(wavesSection(run));
-      $view.appendChild(sliceTableSection(run));
-      $view.appendChild(rollupSection(run));
+      $view.appendChild(stageStrip(run, activeStage));
+      $view.appendChild(stageView(run, activeStage));
       $view.appendChild(escalationsSection(run));
-      $view.appendChild(decisionsSection(run));
+    }
+    // Dispatch the active stage to its section builder (browser-only orchestrator;
+    // the section builders themselves are pure and unit-tested).
+    function stageView(run, activeStage) {
+      if (activeStage === "iron-council") return councilSection(run);
+      if (activeStage === "final-review") return finalReviewSection(run);
+      return executionSection(run);   // execution (and any unknown/preflight) -> the DAG view
+    }
+    // The pipeline nav. Marks the run's CURRENT derived stage and the ACTIVE
+    // (selected) stage; clicking a stage pins it via #run/<id>/<stage>.
+    function stageStrip(run, activeStage) {
+      const strip = el("div", { cls: "stages" });
+      STAGE_ORDER.forEach((st) => {
+        const cls = "stage"
+          + (st === run.stage ? " current" : "")
+          + (st === activeStage ? " active" : "");
+        const item = el("a", { cls: cls, text: STAGE_LABELS[st] || st });
+        item.addEventListener("click", () =>
+          navigate({ kind: "detail", runId: run.run_id, stage: st }));
+        strip.appendChild(item);
+      });
+      return strip;
     }
     function detailHeader(run) {
       const card = el("div", { cls: "run" });
@@ -372,7 +471,7 @@
       const table = el("table");
       const thead = el("thead");
       const htr = el("tr");
-      ["id", "goal", "tier", "depth", "parent", "deps", "status"].forEach((h) => htr.appendChild(el("th", { text: h })));
+      ["id", "goal", "tier", "depth", "parent", "deps", "status", "report"].forEach((h) => htr.appendChild(el("th", { text: h })));
       thead.appendChild(htr);
       const tbody = el("tbody");
       (run.slices || []).forEach((s) => tbody.appendChild(sliceRow(s)));
@@ -395,6 +494,7 @@
       const status = el("td");
       status.appendChild(pill(s.label, null, labelClass(s.label)));
       tr.appendChild(status);
+      tr.appendChild(el("td", { text: s.has_report ? "✓" : "—" }));
       return tr;
     }
     function rollupSection(run) {
@@ -410,12 +510,66 @@
       sec.appendChild(el("div", { cls: "awaiting-list", text: "awaiting human: " + (awaiting.length ? awaiting.join(", ") : "—") }));
       return sec;
     }
+    // ---- stage: execution (the DAG view) ----------------------------------
+    // Composes the existing waves + slice table + status rollup + decisions tail
+    // into one stage view. A wrapper div so renderDetail appends a single node.
+    function executionSection(run) {
+      const wrap = el("div", { cls: "stage-view" });
+      wrap.appendChild(wavesSection(run));
+      wrap.appendChild(sliceTableSection(run));
+      wrap.appendChild(rollupSection(run));
+      wrap.appendChild(decisionsSection(run));
+      return wrap;
+    }
+
+    // ---- stage: iron council (findings) -----------------------------------
+    function councilSection(run) {
+      const sec = el("div", { cls: "section" });
+      sec.appendChild(el("h3", { text: "iron council findings" }));
+      const council = run.council || [];
+      if (!council.length) {
+        sec.appendChild(el("div", { cls: "empty", text: "no council verdicts recorded" }));
+        return sec;
+      }
+      council.forEach((c) => {
+        const box = el("div", { cls: "finding" });
+        box.appendChild(el("span", { cls: "scope", text: "[" + (c.scope || "?") + "] " }));
+        box.appendChild(pill(c.verdict || "—", null, verdictClass(c.verdict)));
+        box.appendChild(el("div", { cls: "finding-summary", text: c.summary || "" }));
+        sec.appendChild(box);
+      });
+      return sec;
+    }
+
+    // ---- stage: final review (executive dashboard from the runbook) -------
+    function finalReviewSection(run) {
+      const sec = el("div", { cls: "section" });
+      sec.appendChild(el("h3", { text: "final review — executive readout" }));
+      const rb = run.runbook;
+      if (!rb) {
+        sec.appendChild(el("div", { cls: "empty", text: "run not finished — no runbook yet" }));
+        return sec;
+      }
+      const fm = rb.front_matter || {};
+      const chips = el("div", { cls: "chips" });
+      ["verdict", "integration_gate", "slice_counts", "gap_counts", "publish"].forEach((k) => {
+        if (fm[k] != null) chips.appendChild(el("span", { cls: "chip", text: k + ": " + fm[k] }));
+      });
+      sec.appendChild(chips);
+      sec.appendChild(el("pre", { cls: "readout", text: rb.executive_readout || "" }));
+      return sec;
+    }
+
+    // ---- static escalations panel (all entries, with status) --------------
     function escalationsSection(run) {
       const sec = el("div", { cls: "section" });
-      sec.appendChild(el("h3", { text: "open escalations" }));
-      const escs = run.open_escalations || [];
+      sec.appendChild(el("h3", { text: "escalations" }));
+      // Prefer the all-with-status list; fall back to the OPEN-only list for
+      // back-compat with an older server payload.
+      const escs = run.escalations
+        || (run.open_escalations || []).map((e) => ({ token: e.token, title: e.title, status: "OPEN" }));
       if (!escs.length) {
-        sec.appendChild(el("div", { cls: "empty", text: "none open" }));
+        sec.appendChild(el("div", { cls: "empty", text: "none" }));
         return sec;
       }
       escs.forEach((e) => {
@@ -423,6 +577,7 @@
         const isIntake = e.token === "intake";
         box.appendChild(el("span", { cls: "token" + (isIntake ? " intake" : ""), text: "[" + (e.token || "?") + "] " }));
         box.appendChild(el("span", { text: e.title || "" }));
+        box.appendChild(el("span", { cls: "status " + statusClass(e.status), text: " " + (e.status || "") }));
         sec.appendChild(box);
       });
       return sec;
@@ -498,6 +653,7 @@
     }
 
     function repaint(data) {
+      lastData = data;                    // remember it so a stage switch can re-render without a refetch
       if (view.kind === "detail") renderDetail(data);
       else renderOverview(data.runs || []);
     }
@@ -507,10 +663,21 @@
     }
 
     // ---- navigation -------------------------------------------------------
+    function detailHash(next) {
+      let hash = "#run/" + encodeURIComponent(next.runId);
+      if (next.stage) hash += "/" + encodeURIComponent(next.stage);
+      return hash;
+    }
     function navigate(next) {
+      // Switching ONLY the stage within the same run needs no refetch — the
+      // detail payload already carries every stage's data, so re-render from the
+      // last payload immediately (a fresh fetch could 304 and never repaint).
+      const stageSwitch = next.kind === "detail" && view.kind === "detail"
+        && next.runId === view.runId && lastData && !lastData.status;
       view = next;
-      const hash = next.kind === "detail" ? "#run/" + encodeURIComponent(next.runId) : "#";
+      const hash = next.kind === "detail" ? detailHash(next) : "#";
       if (location.hash !== hash) location.hash = hash;   // also triggers hashchange (idempotent)
+      if (stageSwitch) { renderCrumbs(); renderDetail(lastData); return; }
       enterView();
     }
     function enterView() {
@@ -518,6 +685,7 @@
       clearTimeout(goneTimer);            // cancel any pending "run gone" auto-nav
       viewGen++;                          // invalidate any in-flight poll from the prior view
       connected = false;                  // require a fresh good response for the new view
+      lastData = null;                    // a fresh view must not reuse the prior view's payload
       renderCrumbs();
       $view.className = "empty";
       $view.textContent = "loading…";
@@ -532,9 +700,8 @@
     if (HAS_DOM) {
       window.addEventListener("hashchange", () => {
         const next = parseHash();
-        if (next.kind !== view.kind || next.runId !== view.runId) {
-          view = next;
-          enterView();
+        if (next.kind !== view.kind || next.runId !== view.runId || next.stage !== view.stage) {
+          navigate(next);   // routes stage-only switches through the no-refetch fast path
         }
       });
 
@@ -552,8 +719,9 @@
     // coverage). The two lists MUST stay in sync — index.test.mjs asserts it.
     /* test-export */ if (typeof module !== "undefined" && module.exports) {
       module.exports = {
-        labelClass, sha7, truncate, groupRunsByRoot, parseHashFrom,
+        labelClass, verdictClass, sha7, truncate, groupRunsByRoot, parseHashFrom,
         el, overviewCard, rootGroupSection, sliceRow, __setDocument,
+        stageStrip, councilSection, executionSection, finalReviewSection, escalationsSection,
       };
     }
   </script>

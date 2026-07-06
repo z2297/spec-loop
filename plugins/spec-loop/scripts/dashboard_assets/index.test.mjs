@@ -36,8 +36,9 @@ const HTML_PATH = join(HERE, "index.html");
 // /* test-export */ list; the loader asserts the page's tail matches this set so
 // the two can never silently drift.
 const EXPORTS = [
-  "labelClass", "sha7", "truncate", "groupRunsByRoot", "parseHashFrom",
+  "labelClass", "verdictClass", "sha7", "truncate", "groupRunsByRoot", "parseHashFrom",
   "el", "overviewCard", "rootGroupSection", "sliceRow", "__setDocument",
+  "stageStrip", "councilSection", "executionSection", "finalReviewSection", "escalationsSection",
 ];
 
 // Extract the inline <script> body and rewrite it into an importable ES module:
@@ -220,12 +221,12 @@ test("parseHashFrom: namespaced run-id survives the encode->parse round-trip", (
   // "<root>:<runId>" — the colon (and any slash) must round-trip intact.
   const runId = "myrepo:20260630-full-coverage";
   const hash = "#run/" + encodeURIComponent(runId);
-  assert.deepEqual(mod.parseHashFrom(hash), { kind: "detail", runId });
+  assert.deepEqual(mod.parseHashFrom(hash), { kind: "detail", runId, stage: null });
 
   const slashy = "grp/sub:run-1";
   assert.deepEqual(
     mod.parseHashFrom("#run/" + encodeURIComponent(slashy)),
-    { kind: "detail", runId: slashy },
+    { kind: "detail", runId: slashy, stage: null },
   );
 });
 
@@ -272,14 +273,14 @@ test("overviewCard short-circuits to a transient placeholder for an unreadable r
   assert.match(card.textContent, /in progress/);
 });
 
-test("sliceRow yields 7 cells with truncated goal and an allowlisted label class", () => {
+test("sliceRow yields 8 cells (incl. report marker) with truncated goal and an allowlisted label class", () => {
   const longGoal = "g".repeat(150);
   const row = mod.sliceRow({
     id: "s1", goal: longGoal, risk_tier: 2, depth: 0, parent: null,
-    deps: ["s0"], label: "complete",
+    deps: ["s0"], label: "complete", has_report: true,
   });
   const cells = row.children;
-  assert.equal(cells.length, 7);
+  assert.equal(cells.length, 8);
   assert.equal(cells[0].textContent, "s1");
   assert.ok(cells[1].textContent.endsWith("…"), "long goal is truncated with an ellipsis");
   assert.ok(cells[1].textContent.length < longGoal.length);
@@ -289,6 +290,7 @@ test("sliceRow yields 7 cells with truncated goal and an allowlisted label class
   assert.equal(cells[5].textContent, "s0");  // deps joined
   const labelPill = cells[6].children[0];
   assert.match(labelPill.className, /lbl-complete/);
+  assert.equal(cells[7].textContent, "✓");   // has_report -> check
 });
 
 test("sliceRow maps an unknown label to the lbl-unknown fallback class", () => {
@@ -314,4 +316,93 @@ test("rootGroupSection renders the raw root key as text only, never as markup", 
   // NEGATIVE (the real guarantee): no child ELEMENT nodes were created from the
   // string — it was set via textContent, never parsed as HTML.
   assert.equal(h3.children.length, 0, "root key must not become child elements");
+});
+
+// ---- 6. stage-aware detail builders ----
+test("verdictClass allowlists council verdicts and falls back for unknown/proto keys", () => {
+  assert.equal(mod.verdictClass("ENDORSE"), "v-endorse");
+  assert.equal(mod.verdictClass("ENDORSE_WITH_CONCERNS"), "v-ewc");
+  assert.equal(mod.verdictClass("OBJECT"), "v-object");
+  assert.equal(mod.verdictClass("weird"), "v-unknown");
+  for (const proto of ["constructor", "__proto__", "toString"]) {
+    assert.equal(mod.verdictClass(proto), "v-unknown", `${proto} must not resolve to an inherited member`);
+  }
+});
+
+test("parseHashFrom parses an optional stage segment; run-id ':' survives, first '/' splits", () => {
+  assert.deepEqual(mod.parseHashFrom("#"), { kind: "overview" });
+  assert.deepEqual(mod.parseHashFrom("#run/r1"), { kind: "detail", runId: "r1", stage: null });
+  assert.deepEqual(mod.parseHashFrom("#run/r1/execution"), { kind: "detail", runId: "r1", stage: "execution" });
+  // a namespaced <root>:<id> run-id round-trips; only the FIRST '/' splits off the stage
+  assert.deepEqual(
+    mod.parseHashFrom("#run/" + encodeURIComponent("repoA:r1") + "/final-review"),
+    { kind: "detail", runId: "repoA:r1", stage: "final-review" },
+  );
+});
+
+test("stageStrip renders all three stages, marking the current and the active one", () => {
+  const strip = mod.stageStrip({ run_id: "r1", stage: "execution" }, "iron-council");
+  const items = strip.children;
+  assert.equal(items.length, 3);
+  const current = items.find((i) => /\bcurrent\b/.test(i.className));
+  const active = items.find((i) => /\bactive\b/.test(i.className));
+  assert.match(current.textContent, /Execution/);       // current = run's derived stage
+  assert.match(active.textContent, /Iron Council/);      // active = the selected stage
+});
+
+test("councilSection renders findings with an allowlisted verdict pill, or an empty note", () => {
+  const empty = mod.councilSection({ council: [] });
+  assert.match(empty.textContent, /no council verdicts/);
+  const sec = mod.councilSection({ council: [
+    { scope: "intake", verdict: "OBJECT", summary: "premise unclear" },
+  ] });
+  assert.match(sec.textContent, /\[intake\]/);
+  assert.match(sec.textContent, /premise unclear/);
+  const finding = sec.children[1];        // [0]=h3, [1]=first finding
+  const verdictPill = finding.children[1]; // [0]=scope, [1]=verdict pill, [2]=summary
+  assert.match(verdictPill.className, /v-object/);
+});
+
+test("finalReviewSection shows a not-finished note without a runbook, and chips + readout with one", () => {
+  const none = mod.finalReviewSection({});
+  assert.match(none.textContent, /no runbook/);
+  const sec = mod.finalReviewSection({ runbook: {
+    front_matter: { integration_gate: "green", publish: "left-local" },
+    executive_readout: "**What we set out to do.** Ship it.",
+  } });
+  assert.match(sec.textContent, /integration_gate: green/);
+  assert.match(sec.textContent, /publish: left-local/);
+  assert.match(sec.textContent, /Ship it/);
+});
+
+test("escalationsSection lists all with status, falls back to open-only, and handles empty", () => {
+  const sec = mod.escalationsSection({ escalations: [
+    { token: "intake", title: "scope", status: "ANSWERED" },
+    { token: "s2", title: "ambiguous", status: "OPEN" },
+  ] });
+  assert.match(sec.textContent, /\[intake\]/);
+  assert.match(sec.textContent, /ANSWERED/);
+  assert.match(sec.textContent, /\[s2\]/);
+  assert.match(sec.textContent, /OPEN/);
+  // back-compat: only open_escalations present -> each treated as OPEN
+  const fb = mod.escalationsSection({ open_escalations: [{ token: "s9", title: "x" }] });
+  assert.match(fb.textContent, /\[s9\]/);
+  assert.match(fb.textContent, /OPEN/);
+  // truly empty
+  assert.match(mod.escalationsSection({ escalations: [] }).textContent, /none/);
+});
+
+test("executionSection composes waves, slice table, rollup, and decisions into one view", () => {
+  const run = {
+    slices: [{ id: "s1", goal: "g", risk_tier: 2, depth: 0, parent: null, deps: [], label: "complete", has_report: true }],
+    waves: [["s1"]],
+    counts: { complete: 1 },
+    decisions_tail: ["[s1] did a thing"],
+  };
+  const t = mod.executionSection(run).textContent;
+  assert.match(t, /DAG \/ waves/);
+  assert.match(t, /slices/);
+  assert.match(t, /status rollup/);
+  assert.match(t, /recent decisions/);
+  assert.match(t, /did a thing/);
 });

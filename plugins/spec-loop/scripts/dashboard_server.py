@@ -63,6 +63,8 @@ MAX_RUNS = 500              # cap runs scanned per request
 MAX_FILE_BYTES = 1_000_000  # cap any single artifact read into memory
 DECISIONS_TAIL_LINES = 12   # cap decisions-log tail length
 REQUEST_EXCERPT_CHARS = 240 # cap the one-line request excerpt
+COUNCIL_MAX = 50            # cap parsed Iron Council verdict lines per run
+COUNCIL_SUMMARY_CHARS = 240 # cap each council summary line
 
 DEFAULT_PORT = 8787
 DATA_SUBPATH = ("docs", "spec-loop")
@@ -177,17 +179,23 @@ def _scan_one_run(run_dir):
         "answered_ids": _parse_answered_slice_ids(run_dir),
     }
     enriched = [_label_slice(s, ctx, run_dir) for s in slices]
+    runbook = _parse_runbook(run_dir)
     return {
         "run_id": run_id,
         "base_ref": dag.get("base_ref"),
         "base_sha": dag.get("base_sha"),
+        "stage": _derive_stage(slices, run_dir),
         "slices": enriched,
         "waves": _derive_waves(slices),
         "open_escalations": open_escs,
+        "escalations": _parse_all_escalations(run_dir),
+        "council": _parse_council(run_dir),
         "request_excerpt": _request_excerpt(run_dir),
         "decisions_tail": _decisions_tail(run_dir),
         "counts": _count_labels(enriched),
-        "has_runbook": (run_dir / "runbook.md").is_file(),
+        "artifacts": _list_artifacts(run_dir),
+        "runbook": runbook,
+        "has_runbook": runbook is not None,
     }
 
 
@@ -364,10 +372,151 @@ def _decisions_tail(run_dir):
     return lines[-DECISIONS_TAIL_LINES:]
 
 
+# --- stage derivation (cold-artifact only — never a live "running" claim) ---
+
+def _derive_stage(slices, run_dir):
+    """The run's furthest-progressed stage, derived from cold artifacts:
+    ``preflight`` (no slices decomposed yet) < ``iron-council`` (decomposed but
+    no slice work has started) < ``execution`` (some work done, not all terminal)
+    < ``final-review`` (every slice terminal — complete/split). Read-only; this is
+    an honest artifact signal, not a claim that anything is running right now."""
+    if not slices:
+        return "preflight"
+    if all(s.get("status") in ("complete", "split") for s in slices):
+        return "final-review"
+    started = any(s.get("status") in ("complete", "split") for s in slices) or \
+        any((run_dir / f"slice-{s.get('id')}-report.md").is_file() for s in slices)
+    return "execution" if started else "iron-council"
+
+
+# --- Iron Council findings (from decisions-log.md) --------------------------
+
+def _bracket_prefix(line):
+    """Split a ``[token] rest`` line (tolerating leading #/-/* whitespace) into
+    ``(token, rest)``, or ``(None, "")`` when it has no leading bracket token."""
+    s = line.lstrip("#-* \t")
+    if not s.startswith("["):
+        return None, ""
+    close = s.find("]")
+    if close == -1:
+        return None, ""
+    return s[1:close].strip(), s[close + 1:].strip()
+
+
+def _first_verdict(upper):
+    """The strongest council verdict named in an upper-cased line, or ''.
+    ENDORSE_WITH_CONCERNS is checked before ENDORSE (it contains 'ENDORSE')."""
+    for v in ("ENDORSE_WITH_CONCERNS", "OBJECT", "ENDORSE"):
+        if v in upper:
+            return v
+    return ""
+
+
+def _parse_council(run_dir):
+    """Iron Council verdicts from decisions-log.md. Each ``[<scope>] COUNCIL…`` or
+    ``[<scope>] IRON COUNCIL…`` line yields ``{scope, verdict, summary}`` where
+    ``scope`` is the bracket token (a slice id or ``intake``) and ``verdict`` is the
+    verdict named in the line. Pure; bounded to COUNCIL_MAX entries."""
+    text = _read_text_capped(run_dir / "decisions-log.md")
+    out = []
+    for line in text.splitlines():
+        token, rest = _bracket_prefix(line)
+        if token is None:
+            continue
+        upper = rest.upper()
+        if not (upper.startswith("COUNCIL") or upper.startswith("IRON COUNCIL")):
+            continue
+        out.append({
+            "scope": token,
+            "verdict": _first_verdict(upper),
+            "summary": rest[:COUNCIL_SUMMARY_CHARS],
+        })
+        if len(out) >= COUNCIL_MAX:
+            break
+    return out
+
+
+# --- all escalations with status (the static Escalations panel) -------------
+
+def _parse_all_escalations(run_dir):
+    """Every escalation entry (both marker forms) as ``[{token, title, status}]``,
+    where status is 'OPEN', 'ANSWERED', or 'unknown'. Mirrors the OPEN-only
+    ``_parse_open_escalations`` but keeps ANSWERED entries too, for the persistent
+    Escalations panel."""
+    return [
+        {"token": tok, "title": title, "status": state or "unknown"}
+        for tok, title, state in _iter_escalation_headers(run_dir)
+    ]
+
+
+# --- runbook (the final-review executive dashboard source) ------------------
+
+def _parse_front_matter(text):
+    """Top-level ``key: value`` pairs between the leading ``---`` fences of a
+    Markdown file. Nested inline ``{...}`` values are kept as raw strings. Returns
+    {} when there is no leading front-matter block."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    fm = {}
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        key, sep, val = line.partition(":")
+        if sep and key.strip() and not key.startswith((" ", "\t")):
+            fm[key.strip()] = val.strip()
+    return fm
+
+
+def _section_text(text, heading):
+    """The body of a Markdown section: lines after ``heading`` up to the next
+    ``## `` heading (exclusive), stripped."""
+    out, capturing = [], False
+    for line in text.splitlines():
+        if line.strip() == heading:
+            capturing = True
+            continue
+        if capturing and line.startswith("## "):
+            break
+        if capturing:
+            out.append(line)
+    return "\n".join(out).strip()
+
+
+def _parse_runbook(run_dir):
+    """Parse runbook.md into ``{front_matter, executive_readout}``, or ``None`` when
+    absent. Feeds the final-review executive dashboard."""
+    path = run_dir / "runbook.md"
+    if not path.is_file():
+        return None
+    text = _read_text_capped(path)
+    return {
+        "front_matter": _parse_front_matter(text),
+        "executive_readout": _section_text(text, "## Executive Readout"),
+    }
+
+
+# --- artifact inventory (files created along the way) -----------------------
+
+def _list_artifacts(run_dir):
+    """Sorted names of the known run artifacts present in ``run_dir`` — the fixed
+    run-state files plus any ``slice-*-report.md`` / ``slice-*-split.json``."""
+    names = set()
+    for name in ("dag.json", "request.md", "decisions-log.md",
+                 "escalations.md", "runbook.md"):
+        if (run_dir / name).is_file():
+            names.add(name)
+    for pattern in ("slice-*-report.md", "slice-*-split.json"):
+        for path in glob.glob(str(run_dir / pattern)):
+            names.add(Path(path).name)
+    return sorted(names)
+
+
 def _run_etag(run_dir):
     """Per-run ETag from the mtimes of dag.json + sibling artifacts."""
     parts = []
-    for name in ("dag.json", "request.md", "escalations.md", "decisions-log.md"):
+    for name in ("dag.json", "request.md", "escalations.md",
+                 "decisions-log.md", "runbook.md"):
         try:
             parts.append(f"{name}:{os.path.getmtime(run_dir / name):.6f}")
         except OSError:

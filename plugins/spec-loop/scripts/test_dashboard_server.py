@@ -73,10 +73,27 @@ def build_fixture(tmp: Path) -> Path:
         "# Request\n\nFirst meaningful line of the request.\nSecond line.\n"
     )
     (docs / "run-normal" / "decisions-log.md").write_text(
-        "[intake] line one\n[s1] line two\n[s2] line three\n"
+        "[intake] COUNCIL: ENDORSE_WITH_CONCERNS — folded scope concerns.\n"
+        "[intake] DECISION: not a council line — must be ignored.\n"
+        "[s1] IRON COUNCIL on plan: OBJECT — 3/5 object.\n"
+        "- s1 DONE VERIFIED by controller: merge abc.\n"
+        "[s2] line three\n"
     )
     (docs / "run-normal" / "slice-s1-report.md").write_text("done")
-    (docs / "run-normal" / "runbook.md").write_text("# RUNBOOK\n\n## Executive Readout\n")
+    (docs / "run-normal" / "runbook.md").write_text(
+        "---\n"
+        "schema_version: 1\n"
+        "run_id: run-normal\n"
+        "integration_gate: green\n"
+        "slice_counts: { complete: 1, split: 0, remediation: 0 }\n"
+        "publish: left-local\n"
+        "---\n\n"
+        "# RUNBOOK — run-normal\n\n"
+        "## Executive Readout\n\n"
+        "**What we set out to do.** Ship the thing.\n\n"
+        "## 1. What Was Built\n\n"
+        "table goes here\n"
+    )
 
     # --- split run: split parent + its <parent>.N children ---
     write_dag(docs / "run-split", [
@@ -217,6 +234,85 @@ class ScanRunsTests(unittest.TestCase):
         # run-normal has a runbook.md; run-split has none.
         self.assertTrue(runs["run-normal"]["has_runbook"])
         self.assertFalse(runs["run-split"]["has_runbook"])
+
+    # ---- stage derivation (cold-artifact only) -------------------------------
+
+    def test_derive_stage_preflight_when_no_slices(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(ds._derive_stage([], Path(d)), "preflight")
+
+    def test_derive_stage_iron_council_when_decomposed_but_unstarted(self):
+        with tempfile.TemporaryDirectory() as d:
+            slices = [slice_obj("s1", status="pending"),
+                      slice_obj("s2", status="pending")]
+            self.assertEqual(ds._derive_stage(slices, Path(d)), "iron-council")
+
+    def test_derive_stage_execution_when_a_report_exists_but_not_terminal(self):
+        with tempfile.TemporaryDirectory() as d:
+            run_dir = Path(d)
+            (run_dir / "slice-s1-report.md").write_text("done")
+            slices = [slice_obj("s1", status="pending"),
+                      slice_obj("s2", status="pending")]
+            self.assertEqual(ds._derive_stage(slices, run_dir), "execution")
+
+    def test_derive_stage_final_review_when_all_terminal(self):
+        with tempfile.TemporaryDirectory() as d:
+            slices = [slice_obj("s1", status="complete"),
+                      slice_obj("s2", status="split")]
+            self.assertEqual(ds._derive_stage(slices, Path(d)), "final-review")
+
+    def test_stage_field_on_scanned_runs(self):
+        runs = self.runs_by_id()
+        # run-normal: s1 complete, s2/s3 pending -> execution.
+        self.assertEqual(runs["run-normal"]["stage"], "execution")
+
+    # ---- Iron Council findings -----------------------------------------------
+
+    def test_council_findings_parsed_with_verdicts(self):
+        council = self.runs_by_id()["run-normal"]["council"]
+        # Two council lines; the plain DECISION line and the DONE bullet are ignored.
+        self.assertEqual(len(council), 2)
+        self.assertEqual(council[0]["scope"], "intake")
+        self.assertEqual(council[0]["verdict"], "ENDORSE_WITH_CONCERNS")
+        self.assertEqual(council[1]["scope"], "s1")
+        self.assertEqual(council[1]["verdict"], "OBJECT")
+
+    def test_council_empty_when_no_decisions_log(self):
+        self.assertEqual(self.runs_by_id()["run-split"]["council"], [])
+
+    # ---- all escalations, with status ----------------------------------------
+
+    def test_all_escalations_include_answered_with_status(self):
+        escs = {e["token"]: e["status"] for e in self.runs_by_id()["run-esc"]["escalations"]}
+        self.assertEqual(escs["s2"], "OPEN")
+        self.assertEqual(escs["s3"], "ANSWERED")
+        self.assertEqual(escs["intake"], "OPEN")
+
+    # ---- runbook (final-review executive source) -----------------------------
+
+    def test_runbook_front_matter_and_executive_readout_parsed(self):
+        rb = self.runs_by_id()["run-normal"]["runbook"]
+        self.assertIsNotNone(rb)
+        self.assertEqual(rb["front_matter"]["integration_gate"], "green")
+        self.assertEqual(rb["front_matter"]["publish"], "left-local")
+        # inline {...} value kept raw
+        self.assertIn("complete: 1", rb["front_matter"]["slice_counts"])
+        # section body captured up to the next "## " heading (table excluded)
+        self.assertIn("Ship the thing", rb["executive_readout"])
+        self.assertNotIn("What Was Built", rb["executive_readout"])
+
+    def test_runbook_is_none_when_absent(self):
+        self.assertIsNone(self.runs_by_id()["run-split"]["runbook"])
+
+    # ---- artifact inventory --------------------------------------------------
+
+    def test_artifacts_lists_present_run_files(self):
+        arts = self.runs_by_id()["run-normal"]["artifacts"]
+        self.assertIn("dag.json", arts)
+        self.assertIn("decisions-log.md", arts)
+        self.assertIn("runbook.md", arts)
+        self.assertIn("slice-s1-report.md", arts)
+        self.assertEqual(arts, sorted(arts))
 
     def test_request_excerpt_skips_heading(self):
         run = self.runs_by_id()["run-normal"]
