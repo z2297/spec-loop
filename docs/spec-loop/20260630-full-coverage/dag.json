@@ -1,0 +1,115 @@
+{
+  "base_ref": "alpha",
+  "base_sha": "ac3759b88f4b3c8f49017a12edd2ef6188c890f9",
+  "shared_constraints": [
+    "TARGET = coverable-max, not literal 100%: cover all meaningful behavior in the importable Python layer; the OMIT manifest documents each excluded line's rationale (`__main__` guards, argparse-glue that only wires to serve, live `serve_forever`/daemon-only tails). Drive coverage to ~100% of the coverable set.",
+    "STDLIB ONLY for Python coverage: measure with the stdlib `trace` module. NEVER add coverage.py, pytest, or any third-party test/coverage dependency.",
+    "NEW PYTHON TESTS MATCH scripts/test_*.py conventions: stdlib `unittest`, one guard file per script, HTTP handler exercised over a real socket on ephemeral port 0 via build_server, subprocess boundaries via mock.patch(\"<module>.subprocess.run\") with an argv-recording fake. No third-party mocks beyond unittest.mock.",
+    "GUARDIAN INVARIANT: release.py tests MUST run against an isolated tmp root (tempfile), NEVER the real repo root `.` — a test must not mutate the live checkout's plugin.json/marketplace.json/CHANGELOG.md.",
+    "GUARDIAN INVARIANT: preserve existing BEHAVIORAL security assertions (loopback 127.0.0.1 publish, `:ro` mounts, `--cap-drop ALL`, no docker.sock, path-traversal realpath+commonpath confinement, closed Host allowlist, GET/HEAD-only). Coverage tests ADD to these; never replace a behavioral assert with an assert-nothing line-hit.",
+    "JS HARNESS uses Node BUILT-INS ONLY: node:test + node:assert + `node --test --experimental-test-coverage` (Node 20 is already installed in CI). NO npm install, NO package.json dependency, NO third-party JS runner. The human explicitly OVERRODE the prior 'no committed JS harness / out-of-tree only' decision — committing this harness is authorized.",
+    "DURABLE ENFORCEMENT lives in the repo's .github/workflows/validate.yml (repo-scoped, deterministic). Do NOT modify the machine-global ~/.claude/spec-loop/quality-gate.json.",
+    "The ONLY endorsed testability refactor is a minimal, behavior-preserving `main(argv=None)` so argparse paths are unit-testable without sys.argv manipulation. Everything else is additive tests."
+  ],
+  "slices": [
+    {
+      "id": "s1",
+      "goal": "Foundation: (1) add a step to .github/workflows/validate.yml that runs the full Python unittest suite (`python3 -m unittest discover -s scripts -p 'test_*.py'` or explicit modules) — it currently runs NONE; (2) add scripts/measure_coverage.py: a stdlib-`trace`-only tool that runs the unittest suite under trace.Trace(count=1), computes per-file executed/executable lines for scripts/*.py minus an OMIT manifest, prints a report, and exits non-zero below configured per-file + total floors; (3) add the OMIT manifest (e.g. scripts/coverage_omit.txt or a dict in measure_coverage.py) documenting each excluded line/pattern with rationale; (4) wire measure_coverage.py into validate.yml as a gate, initially set to the CURRENT measured floor (~72% total, per-file baselines) so it locks in no-regression without blocking on the not-yet-written tests; (5) add scripts/test_measure_coverage.py covering the tool's own pure logic. Deterministic, no Docker, no third-party deps.",
+      "files": [".github/workflows/validate.yml", "scripts/measure_coverage.py", "scripts/coverage_omit.txt", "scripts/test_measure_coverage.py"],
+      "subsystems": ["ci", "coverage-tooling"],
+      "deps": [],
+      "risk_tier": 2,
+      "depth": 0,
+      "parent": null,
+      "status": "complete"
+    },
+    {
+      "id": "s2",
+      "goal": "Add scripts/test_release.py covering scripts/release.py's pure file-transform logic (bump_plugin_version, add_archive_entry, roll_changelog, extract_notes, cut_release, and main() argument/validation paths) against an isolated tmp root seeded with fixture plugin.json/marketplace.json/CHANGELOG.md. Assert resulting file CONTENT (version bumped, archive entry pinned to v<version>, changelog rolled), not line-hits. If needed for argparse coverage, apply the minimal main(argv=None) refactor to release.py. NEVER run against the real repo root. This is the highest-ROI slice (release.py is 0.0% today).",
+      "files": ["scripts/test_release.py", "scripts/release.py"],
+      "subsystems": ["release-tooling", "tests"],
+      "deps": ["s1"],
+      "risk_tier": 2,
+      "depth": 0,
+      "parent": null,
+      "status": "complete"
+    },
+    {
+      "id": "s3",
+      "goal": "Raise scripts/validate_marketplace.py coverage (69.2%, 64 missed) by adding tests to scripts/test_validate_marketplace.py for the real error/branch paths (validation failures, malformed manifests, the reporting/exit paths) — asserting observable behavior (which inputs produce which validation errors/exit codes), following the existing test file's conventions. Do NOT touch validate_marketplace.py unless a minimal main(argv=None) refactor is required for argparse coverage.",
+      "files": ["scripts/test_validate_marketplace.py", "scripts/validate_marketplace.py"],
+      "subsystems": ["marketplace-validation", "tests"],
+      "deps": ["s1"],
+      "risk_tier": 2,
+      "depth": 0,
+      "parent": null,
+      "status": "complete"
+    },
+    {
+      "id": "s4",
+      "goal": "Raise scripts/dashboard_server.py coverage (67.0%, 124 missed) by adding tests to scripts/test_dashboard_server.py for the uncovered HTTP handler branches (static asset serving, 404/405/421/304 paths, _serve_static/_read_asset, response helpers, content-type) exercised over a real socket on ephemeral port 0 via build_server, plus the argparse/main path via a minimal main(argv=None) refactor (excluding the serve_forever tail via the OMIT manifest). PRESERVE all existing behavioral security assertions (loopback bind, closed Host allowlist not widened by 0.0.0.0, per-root path-traversal confinement) — add coverage, never weaken them. Security-critical file: this slice is Tier 3.",
+      "files": ["scripts/test_dashboard_server.py", "scripts/dashboard_server.py"],
+      "subsystems": ["dashboard-server", "tests"],
+      "deps": ["s1"],
+      "risk_tier": 3,
+      "depth": 0,
+      "parent": null,
+      "status": "complete"
+    },
+    {
+      "id": "s5",
+      "goal": "Close the remaining scripts/dashboard_launcher.py gap (92.9%, 17 missed lines: parts of the thin subprocess shell _run/_launch/_stop/_fallback/main) by adding tests to scripts/test_dashboard_launcher.py using the ESTABLISHED mock.patch(\"dashboard_launcher.subprocess.run\") argv-recording-fake pattern already in that file — never calling _run unmocked, never invoking real docker. Exclude only the genuinely unreachable `__main__` shim via the OMIT manifest. Preserve the existing security-invariant assertions.",
+      "files": ["scripts/test_dashboard_launcher.py"],
+      "subsystems": ["dashboard-launcher", "tests"],
+      "deps": ["s1"],
+      "risk_tier": 2,
+      "depth": 0,
+      "parent": null,
+      "status": "complete"
+    },
+    {
+      "id": "s6",
+      "goal": "Bring the client scripts/dashboard_assets/index.html JS under a COMMITTED test harness using Node built-ins ONLY (node:test + node:assert; coverage via `node --test --experimental-test-coverage`). Make index.html's inline JS testable (e.g. extract the pure functions — groupRunsByRoot, rendering/format/navigate helpers — into a form importable by a committed *.test.mjs, or expose them under a testable module boundary) WITHOUT breaking the self-contained single-file page (no CDN/npm, no build step). Add the committed test file(s) and add a Node test step to .github/workflows/validate.yml (Node 20 is already installed there). Assert observable behavior (DOM/render output, grouping, id round-trip) matching the s4 dashboard slice's verified behavior; keep the read-only/no-new-fetch-verb boundary. Human authorized committing a JS harness (overrides the prior out-of-tree-only decision).",
+      "files": ["scripts/dashboard_assets/index.html", "scripts/dashboard_assets/index.test.mjs", ".github/workflows/validate.yml"],
+      "subsystems": ["dashboard-client", "ci", "tests"],
+      "deps": ["s1"],
+      "risk_tier": 2,
+      "depth": 0,
+      "parent": null,
+      "status": "complete"
+    },
+    {
+      "id": "s8",
+      "goal": "Close the remaining genuinely-coverable logic gaps in scripts/pr_resolver.py and scripts/validate_marketplace.py (neither fully covered; pr_resolver had no prior coverage slice). pr_resolver missed logic (real, not import-artifact): the malformed-URL raises (Bitbucket ~L132, Azure DevOps ~L153/L161), the fetch success return (~L198 resp.read()), the HTTP-error raise (~L200 ResolverError HTTP <code>), and the ~L384 return None branch — cover via crafted URLs + a mocked urlopen (mock.patch the module's urlopen/subprocess boundary; never hit the network). validate_marketplace missed branches: the two loop `continue` skip-paths (~L182, ~L202) — cover with crafted manifest/plugin entries in an isolated tmp dir. Assert observable behavior (which inputs raise which ResolverError / produce which validation outcome). Add tests only; do NOT touch production code except a minimal main(argv=None) if strictly needed.",
+      "files": ["scripts/test_pr_resolver.py", "scripts/test_validate_marketplace.py", "scripts/pr_resolver.py"],
+      "subsystems": ["pr-resolver", "marketplace-validation", "tests"],
+      "deps": ["s1"],
+      "risk_tier": 2,
+      "depth": 0,
+      "parent": null,
+      "status": "complete"
+    },
+    {
+      "id": "s9",
+      "goal": "Close the remaining genuinely-coverable logic gaps in scripts/dashboard_server.py (residual after s4). Real missed branches to cover: resolve_within's `except ValueError: return None` (~L95/97), the malformed-dag `raise ValueError('slices is not a list')` (~L168), the unsatisfiable-deps `break` in wave derivation (~L231), the escalation-parse `continue`/empty-return branches (~L301/325/337/346), the do_GET / do_HEAD / other-verb-405 handler entry points (~L397/400/415) via REAL-socket GET/HEAD/other-verb requests on ephemeral port 0, and _owning_root's not-found returns (~L467/483-487/496). Exercise handlers over a real socket via build_server (established pattern). Add tests to scripts/test_dashboard_server.py. PRESERVE every existing behavioral security assertion (loopback bind, closed Host allowlist, per-root path-traversal confinement, GET/HEAD-only, no-path-oracle 404) — never weaken to reach a line. Security-critical file: Tier 3. The `if __name__=='__main__': sys.exit(main())` tail (~L664) is OMIT, not a test target.",
+      "files": ["scripts/test_dashboard_server.py"],
+      "subsystems": ["dashboard-server", "tests"],
+      "deps": ["s1"],
+      "risk_tier": 3,
+      "depth": 0,
+      "parent": null,
+      "status": "complete"
+    },
+    {
+      "id": "s7",
+      "goal": "Finalize (runs LAST). (1) FIX scripts/measure_coverage.py so import-time lines (module constants, def/decorator headers, docstrings) are properly attributed — begin tracing before/around module import, or compute a logic-line executable denominator — so reported coverage reflects true logic coverage, not an under-count; keep it stdlib-`trace` only and deterministic; update scripts/test_measure_coverage.py accordingly. (2) Re-measure and RATCHET the per-file + total floors in validate.yml (and any threshold constant) UP to the achieved coverable-max high-water mark. (3) Finalize scripts/coverage_omit.txt with a documented rationale for EVERY excluded line (the four `sys.exit(main())` __main__ shims + the live serve_forever tail + any truly-unreachable defensive line). (4) Add a short docs note (README) on how coverage is measured (stdlib trace + Node --experimental-test-coverage), the exclusion policy, and how to run it locally. Both the Python trace gate and the Node coverage step must fail the build below threshold.",
+      "files": [".github/workflows/validate.yml", "scripts/measure_coverage.py", "scripts/test_measure_coverage.py", "scripts/coverage_omit.txt", "README.md"],
+      "subsystems": ["ci", "coverage-tooling", "docs"],
+      "deps": ["s1", "s2", "s3", "s4", "s5", "s6", "s8", "s9"],
+      "risk_tier": 2,
+      "depth": 0,
+      "parent": null,
+      "status": "complete"
+    }
+  ]
+}

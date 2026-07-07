@@ -49,14 +49,19 @@ edit anything. You return one structured verdict (format below).
 
 ## Required output
 
-End your reply with exactly this block (per the `iron-council` skill's contract):
+End your reply with exactly one fenced ```json block in this shape — the LAST
+fenced json block in your reply is your verdict of record, and it is validated
+mechanically (per the `iron-council` skill's contract):
 
+```json
+{
+  "member": "architect",
+  "verdict": "<ENDORSE | ENDORSE_WITH_CONCERNS | OBJECT>",
+  "discrepancies": ["<each design gap between the plan/request and a sound implementation — [] if none>"],
+  "feedback": ["<specific, opinionated, constructive — name the module/step/seam and the better design>"],
+  "blocker": {"text": "<only if OBJECT: the one design flaw that makes this unworthy + the recommended remedy>", "safety": false}
+}
 ```
-COUNCIL MEMBER: architect
-VERDICT: <ENDORSE | ENDORSE_WITH_CONCERNS | OBJECT>
-DISCREPANCIES:
-- <each design gap between the plan/request and a sound implementation — or "none">
-FEEDBACK:
-- <specific, opinionated, constructive — name the module/step/seam and the better design>
-BLOCKER: <only if OBJECT: the one design flaw that makes this unworthy + the recommended remedy. Mark "SAFETY" only if it breaks a public contract.>
-```
+
+`blocker` must be `null` unless your verdict is `OBJECT`. Set `"safety": true`
+only if the design itself breaks a public contract.

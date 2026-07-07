@@ -31,18 +31,42 @@ Log format (one line each, append-only):
 [<slice-id>] DECISION: <what was decided> — RATIONALE: <evidence/convention> — REVERSIBILITY: <trivial|moderate>
 ```
 
-### SURFACE to human (only these four triggers)
+### SURFACE to human (only these five triggers)
 Do NOT act. Write an escalation entry (format below) and return control:
 
 1. **Genuine ambiguity** — there are ≥2 valid interpretations that materially change scope or behavior, and the codebase/spec cannot resolve which is intended.
 2. **Material assumption** — you would be assuming something non-trivial that affects behavior, scope, public contracts, persisted data, security, or external integrations. (Per the user's global CLAUDE.md, material assumptions must be stated and confirmed — not silently made.)
 3. **Unfixable review BLOCK** — `review-pr` still returns BLOCK MERGE after the auto-fix loop has exhausted its attempt budget.
 4. **Council objection** — the `iron-council` deems a request or plan **unworthy**: a majority of members OBJECT, or any single member raises a `SAFETY` OBJECT (irreversible data loss, security hole, broken public contract). Lesser council concerns (ENDORSE_WITH_CONCERNS, minority non-safety objections) are folded in and logged — they do **not** surface.
+5. **Unfixable quality-gate block** — the `quality-gate` skill's metrics still exceed the configured thresholds after its bounded, behavior-preserving refactor loop has exhausted its attempt budget (trigger: `quality-gate-block`). Thresholds are never weakened to avoid this.
 
 When uncertain whether something is "material": if a reasonable reviewer could reject the slice over it, it is material → surface it.
 
+### Precedent check (before writing any SURFACE escalation)
+
+Prior runs' human answers are settled decisions — check them before interrupting
+the human with a question they may have already answered. Search prior runs
+(excluding the current run's directory), e.g.
+`grep -l "status: ANSWERED" docs/spec-loop/*/escalations.md` plus the Decisions
+Summary of any `docs/spec-loop/*/runbook.md`:
+
+- **A prior human answer squarely resolves this decision** (same question in
+  substance, answer still applicable to this codebase state) → do NOT surface.
+  PROCEED + log, citing the precedent:
+  ```
+  [<slice-id>] DECISION: <what was decided> — RATIONALE: precedent — run <run-id> escalation "<title>" answered: <one-line summary of the human's answer> — REVERSIBILITY: <trivial|moderate>
+  ```
+  This is what keeps run N's adjudication from becoming run N+1's escalation.
+- **A prior answer is related but not squarely on point** → still surface, but
+  quote the prior answer in the escalation's RECOMMENDED DEFAULT option so the
+  human confirms rather than re-derives.
+- **Guard:** precedent only resolves what a human has *already* adjudicated — it
+  never downgrades a genuinely new material assumption, a SAFETY objection, or a
+  decision whose context has materially changed since the prior run. When in
+  doubt whether the precedent squarely applies, surface with it as the default.
+
 ### Not triggers (autonomous by design)
-These look like stopping points but are **not** surfaced — they are handled by the loop itself, keeping the bar at exactly the four triggers above:
+These look like stopping points but are **not** surfaced — they are handled by the loop itself, keeping the bar at exactly the five triggers above:
 - **Slice split (dynamic decomposition).** A slice that turns out to be two-or-more independently shippable changes returns `SPLIT` with a sub-decomposition the controller grafts into the DAG (slice Step 1.6). Autonomous, logged to `decisions-log.md`, no human contact. Only an oversized slice already at the split-depth cap falls back to a trigger above (material assumption / council objection).
 - **Integration remediation.** When the per-wave check or the Phase 5 integration gate finds a cross-slice failure, the controller opens a remediation slice and fixes it through the normal slice loop. The human is reached only if that remediation slice itself exhausts its bounded auto-fix loop — i.e. via trigger 3 (unfixable review BLOCK), unchanged.
 
@@ -59,7 +83,7 @@ These look like stopping points but are **not** surfaced — they are handled by
 Append to `escalations.md`:
 ```
 ## [<slice-id>] <short title>   (status: OPEN)
-- Trigger: <ambiguity | material-assumption | review-block | council-objection>
+- Trigger: <ambiguity | material-assumption | review-block | council-objection | quality-gate-block>
 - Context: <what the loop was doing and why it cannot decide>
 - The decision: <the precise question>
 - Options:
@@ -73,7 +97,8 @@ Append to `escalations.md`:
 Always include a **recommended default** — the loop should make the human's decision as cheap as possible (confirm vs. redirect), consistent with the user's preference for conservative/balanced/innovative options where relevant.
 
 ## Red flags (you are violating the contract)
-- Asking the human something resolvable from the codebase or a clear convention.
+- Asking the human something resolvable from the codebase, a clear convention, or
+  a prior run's answered escalation (run the precedent check first).
 - Surfacing escalations one at a time instead of batching at the wave boundary.
 - Proceeding silently on a material assumption (must log AND surface).
 - Looping the auto-fix step forever instead of surfacing after the attempt budget.

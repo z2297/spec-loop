@@ -1,0 +1,11 @@
+# Slice s3 — report
+
+DONE. Added `scripts/dashboard_launcher.py` (pure-stdlib, unit-tested) + `scripts/test_dashboard_launcher.py`, and rewrote `plugins/spec-loop/commands/dashboard-serve.md`. `/spec-loop:dashboard-serve` now drives a Docker-preferred / python-fallback launch of a single machine-wide singleton container (`spec-loop-dashboard`) that aggregates runs across repos via minimal per-root `:ro` mounts, then exits; `--stop` scoped to the fixed name; stale roots pruned. Pure decision logic (daemon/image detect, registry+prune, desired-mount-set, argv construction, `plan_launch`) split from a thin subprocess shell, unit-tested without a live daemon.
+
+Branch: spec-loop/20260629-docker-dashboard/s3 (merged into alpha, worktree removed)  PR: n/a (merged locally)
+Commits: 72c73ce..ac3759b (feat + 1 review-fix + simplify + quality-gate refactor + merge)
+Council: ENDORSE_WITH_CONCERNS 4/5 — skeptic/pragmatist/guardian/historian EWC, architect OBJECT (non-SAFETY: the mount/`--root` double-`docs/spec-loop` composition defect) — 1 non-SAFETY objection is not a halt; folded ALL concerns (incl. the architect's fix) into the plan.
+Tests: `python3 -m unittest scripts.test_dashboard_{server,launcher} scripts.test_pr_resolver scripts.test_validate_marketplace` -> 172/172 pass (60 launcher). Docker path proven locally: CREATE -> serves root's runs (composition correct) -> REUSE -> RECREATE on 2nd-root registration -> aggregates both roots namespaced -> `--stop` removes singleton. Fallback proven: docker absent (non-repo cwd) AND daemon-down both stream a live foreground server, no crash.
+Review: Tier-3, 5 reviewers. risk APPROVE (no SAFETY; all 5 hard invariants verified in code). correctness REQUEST_CHANGES + silent-failure: 3 findings at/above bar — daemon-down IndexError, `_fallback` cwd-relative-path + captured-output, silent corrupt-registry overwrite/non-numeric crash — ALL fixed in auto-fix attempt 1/2 and re-verified. design/tests APPROVE_WITH_COMMENTS (P2s folded).
+Quality: PASS — initial FAIL (plan_launch params=6>4); refactor 1/3 grouped the four live-docker-state inputs into a `DaemonState` namedtuple (mirrors s1's NetworkConfig) -> 3 params; all metrics within thresholds, behavior/assertions unchanged.
+Open escalations: none.

@@ -1,0 +1,11 @@
+# Decisions log — 20260629-reset-to-origin
+
+Append-only record of decisions the loop made autonomously (proceed-and-log).
+
+[intake] COUNCIL: OBJECT — skeptic OBJECT(SAFETY), guardian OBJECT(SAFETY), architect ENDORSE_WITH_CONCERNS, historian ENDORSE_WITH_CONCERNS, pragmatist ENDORSE. Two SAFETY objections → lifted to human (council-objection) in the up-front batched round before any decomposition/scheduling.
+[intake] DECISION: implement as a pure-prose markdown command (model: quality-gate.md), NOT a Python helper — RATIONALE: unanimous council guidance (architect+pragmatist); pr_resolver.py earns a helper only for untrusted multi-provider input + non-interactive determinism, neither of which applies; the dominant requirement is interactive confirmation (AskUserQuestion). — REVERSIBILITY: moderate
+[intake] DECISION: allowed-tools = ["Bash", "AskUserQuestion"] only (no Edit/Write/Task); avoid the read-only marker phrases in prose — RATIONALE: historian — validate_marketplace.py:24,205-218 flags read-only+Edit; command mutates git so it is not read-only and needs no Edit. — REVERSIBILITY: trivial
+[intake] DECISION: quote `description` and `argument-hint` frontmatter scalars (double quotes) — RATIONALE: historian — validate_marketplace.py:251-259 rejects unquoted top-level scalars containing ': '; this is the class commits f5c96ab/6cdf577/e590fc8 hardened. — REVERSIBILITY: trivial
+[intake] DECISION: do NOT `git clean` untracked/ignored files by default (leave them in place) — RATIONALE: skeptic+architect — repo currently has untracked docs/spec-loop/ and docs/pr-review/ run-state; cleaning would delete working state. Untracked-file handling stated explicitly in the command prose. — REVERSIBILITY: moderate
+[intake] DECISION: detect default branch via `git symbolic-ref --quiet refs/remotes/origin/HEAD`, with fallback chain (set-head --auto → origin/main → origin/master → ask), fail-closed — RATIONALE: architect+historian; net-new (no reusable helper exists). — REVERSIBILITY: moderate
+[intake] DECISION: update BOTH CHANGELOG.md (per-command paragraph) and README.md:92 (commands tree comment) — RATIONALE: historian — established release-notes convention. — REVERSIBILITY: trivial

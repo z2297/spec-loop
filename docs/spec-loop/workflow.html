@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spec-Loop Workflow</title>
+<style>
+  :root {
+    --paper:   #f5f7f9;
+    --card:    #ffffff;
+    --ink:     #10161e;
+    --muted:   #57636f;
+    --faint:   #8b96a2;
+    --hair:    #e2e6ec;
+    --flow:    #2f57d0;
+    --flow-bg: #eaefff;
+    --human:   #a75f10;
+    --human-bg:#fbefdb;
+    --gate:    #12764f;
+    --gate-bg: #e2f2ea;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  body { margin: 0; }
+
+  .page {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    padding: clamp(28px, 5vw, 72px) clamp(18px, 5vw, 56px) 64px;
+  }
+
+  .wrap { max-width: 940px; margin: 0 auto; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--flow);
+    margin: 0 0 14px;
+  }
+
+  h1 {
+    font-size: clamp(34px, 6vw, 52px);
+    line-height: 1.02;
+    letter-spacing: -0.02em;
+    font-weight: 700;
+    text-wrap: balance;
+    margin: 0 0 16px;
+  }
+
+  .lede {
+    font-size: clamp(16px, 2.2vw, 19px);
+    color: var(--muted);
+    max-width: 62ch;
+    margin: 0;
+  }
+
+  /* ---- at a glance ---- */
+  .glance {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+    margin: 40px 0 8px;
+  }
+  .stat {
+    background: var(--card);
+    border: 1px solid var(--hair);
+    border-radius: 12px;
+    padding: 20px 20px 18px;
+  }
+  .stat .n {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 30px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    color: var(--flow);
+    display: block;
+    margin-bottom: 6px;
+  }
+  .stat .k { font-weight: 650; font-size: 14px; margin-bottom: 4px; }
+  .stat .d { font-size: 13px; color: var(--muted); }
+
+  /* ---- flow ---- */
+  .flow-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    margin: 52px 0 22px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--hair);
+  }
+  .flow-head h2 {
+    font-size: 15px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-family: var(--mono);
+    font-weight: 600;
+    margin: 0;
+    color: var(--ink);
+  }
+  .flow-head .sub { font-size: 13px; color: var(--faint); font-family: var(--mono); }
+
+  .node {
+    display: grid;
+    grid-template-columns: 62px 1fr;
+  }
+  .rail { position: relative; }
+  .rail::before {
+    content: "";
+    position: absolute;
+    left: 21px;
+    top: 0; bottom: 0;
+    width: 2px;
+    background: var(--hair);
+  }
+  .node:first-child .rail::before { top: 22px; }
+  .node:last-child  .rail::before { bottom: auto; height: 22px; }
+
+  .num {
+    position: relative;
+    z-index: 1;
+    width: 44px; height: 44px;
+    margin-top: 0;
+    border-radius: 50%;
+    background: var(--card);
+    border: 2px solid var(--flow);
+    color: var(--flow);
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: 17px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .body { padding: 0 0 30px 6px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--hair);
+    border-left: 3px solid var(--flow);
+    border-radius: 10px;
+    padding: 18px 20px 18px;
+  }
+  .body h3 {
+    font-size: 18px;
+    letter-spacing: -0.01em;
+    margin: 0 0 3px;
+    font-weight: 680;
+  }
+  .takeaway {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--flow);
+    margin: 0 0 10px;
+  }
+  .card p.desc { margin: 0; font-size: 14.5px; color: var(--muted); }
+
+  .tags { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 13px; }
+  .tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.03em;
+    padding: 3px 9px;
+    border-radius: 999px;
+    background: var(--flow-bg);
+    color: var(--flow);
+    white-space: nowrap;
+  }
+  .tag.gate  { background: var(--gate-bg);  color: var(--gate); }
+  .tag.loop  { background: #eef1f4; color: var(--muted); }
+
+  /* human-decision nodes */
+  .node.human .num  { border-color: var(--human); color: var(--human); }
+  .node.human .card { border-left-color: var(--human); }
+  .node.human .takeaway { color: var(--human); }
+  .tag.human { background: var(--human-bg); color: var(--human); }
+
+  /* ---- legend ---- */
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 22px;
+    margin-top: 40px;
+    padding-top: 22px;
+    border-top: 1px solid var(--hair);
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 8px; }
+  .dot { width: 11px; height: 11px; border-radius: 50%; flex: none; }
+  .dot.flow  { background: var(--flow); }
+  .dot.human { background: var(--human); }
+  .dot.gate  { background: var(--gate); }
+  .loopmark { font-family: var(--mono); color: var(--muted); }
+
+  .foot {
+    margin-top: 30px;
+    font-size: 12.5px;
+    color: var(--faint);
+    font-family: var(--mono);
+  }
+
+  @media (max-width: 620px) {
+    .glance { grid-template-columns: 1fr; }
+    .node { grid-template-columns: 48px 1fr; }
+    .rail::before { left: 15px; }
+    .num { width: 34px; height: 34px; font-size: 14px; }
+  }
+
+  .node { opacity: 0; transform: translateY(8px); animation: rise .5s ease forwards; }
+  .node:nth-child(2){animation-delay:.05s}.node:nth-child(3){animation-delay:.10s}
+  .node:nth-child(4){animation-delay:.15s}.node:nth-child(5){animation-delay:.20s}
+  .node:nth-child(6){animation-delay:.25s}.node:nth-child(7){animation-delay:.30s}
+  @keyframes rise { to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) {
+    .node { opacity: 1; transform: none; animation: none; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="wrap">
+
+    <p class="eyebrow">Autonomous spec-driven delivery pipeline</p>
+    <h1>How Spec-Loop turns a request into shipped, verified work</h1>
+    <p class="lede">One feature request goes in. It is decomposed into small, independently
+      shippable pieces that are built, reviewed, and quality-gated in parallel — then
+      assembled onto a single branch and verified as a whole. The team is asked to decide
+      only twice: what's genuinely ambiguous up front, and how to ship at the end.</p>
+
+    <div class="glance">
+      <div class="stat">
+        <span class="n">1</span>
+        <div class="k">Integration branch</div>
+        <div class="d">All work converges on a single local branch — no scattered per-slice branches or pull requests by default.</div>
+      </div>
+      <div class="stat">
+        <span class="n">2</span>
+        <div class="k">Human touchpoints</div>
+        <div class="d">You're consulted for real ambiguities up front, and for how to publish at the end. Everything between runs unattended.</div>
+      </div>
+      <div class="stat">
+        <span class="n">4</span>
+        <div class="k">Quality gates per slice</div>
+        <div class="d">Adversarial plan review, risk-scoped code review, an objective quality bar, and fresh verification — before anything merges.</div>
+      </div>
+    </div>
+
+    <div class="flow-head">
+      <h2>The workflow</h2>
+      <span class="sub">request → delivery</span>
+    </div>
+
+    <div class="stages">
+
+      <article class="node">
+        <div class="rail"><div class="num">1</div></div>
+        <div class="body"><div class="card">
+          <h3>Intake &amp; decompose</h3>
+          <p class="takeaway">Turn a request into a vetted plan.</p>
+          <p class="desc">The request is restated and broken into small, independent slices. Before any
+            effort is spent, an adversarial review panel (the "Iron Council") pressure-tests the idea for
+            scope, risk, and soundness. Only genuine ambiguities are raised — once, together, up front.</p>
+          <div class="tags"><span class="tag human">Human decision · only if ambiguous</span><span class="tag gate">Adversarial vetting</span></div>
+        </div></div>
+      </article>
+
+      <article class="node">
+        <div class="rail"><div class="num">2</div></div>
+        <div class="body"><div class="card">
+          <h3>Set up one integration branch</h3>
+          <p class="takeaway">Everything will converge on a single branch.</p>
+          <p class="desc">A dedicated branch is created off <code>main</code>, named for the work. Every slice
+            will merge here and nowhere else. <code>main</code> is never touched until you approve at the end.</p>
+          <div class="tags"><span class="tag">Single branch</span><span class="tag">main untouched</span></div>
+        </div></div>
+      </article>
+
+      <article class="node">
+        <div class="rail"><div class="num">3</div></div>
+        <div class="body"><div class="card">
+          <h3>Schedule work in parallel waves</h3>
+          <p class="takeaway">Independent work runs at once; dependencies wait their turn.</p>
+          <p class="desc">Slices that don't depend on each other build concurrently in isolated workspaces;
+            the rest are ordered so nothing collides. More throughput, no interference.</p>
+          <div class="tags"><span class="tag">Parallel &amp; isolated</span><span class="tag">Dependency-aware</span></div>
+        </div></div>
+      </article>
+
+      <article class="node">
+        <div class="rail"><div class="num">4</div></div>
+        <div class="body"><div class="card">
+          <h3>Build each slice</h3>
+          <p class="takeaway">Plan → build test-first → review → auto-fix → quality gate → verify.</p>
+          <p class="desc">Each slice is planned, its plan re-vetted by the Council, then implemented test-first.
+            Code review runs at a depth matched to the slice's risk, findings are auto-fixed, and the result must
+            clear an objective quality bar and a fresh test run. A slice that turns out too large splits itself
+            back into the plan — automatically.</p>
+          <div class="tags"><span class="tag">Fully autonomous</span><span class="tag gate">Review + quality gate</span><span class="tag loop">↻ self-splits if too large</span></div>
+        </div></div>
+      </article>
+
+      <article class="node">
+        <div class="rail"><div class="num">5</div></div>
+        <div class="body"><div class="card">
+          <h3>Integrate — one slice at a time</h3>
+          <p class="takeaway">Finished work merges serially, race-free.</p>
+          <p class="desc">A single controller — not the parallel workers — merges each verified slice onto the
+            one branch, one after another, then runs the full test suite after every wave. Conflicts and drift
+            surface early, while they're cheap to fix.</p>
+          <div class="tags"><span class="tag">Controller-owned merge</span><span class="tag gate">Suite runs each wave</span></div>
+        </div></div>
+      </article>
+
+      <article class="node">
+        <div class="rail"><div class="num">6</div></div>
+        <div class="body"><div class="card">
+          <h3>Integration gate</h3>
+          <p class="takeaway">Verify the assembled whole, not just the parts.</p>
+          <p class="desc">Once everything has landed, the complete test suite plus a cross-slice review confirm the
+            pieces work together — catching contract drift a per-slice check can't see. Any failure spins up a small
+            remediation task and re-verifies, still without human contact.</p>
+          <div class="tags"><span class="tag gate">Whole-system verification</span><span class="tag loop">↻ auto-remediated</span></div>
+        </div></div>
+      </article>
+
+      <article class="node human">
+        <div class="rail"><div class="num">7</div></div>
+        <div class="body"><div class="card">
+          <h3>Publish — your call</h3>
+          <p class="takeaway">Push as a feature branch, or merge onto main.</p>
+          <p class="desc">The run ends by asking how to ship the finished, verified branch: open it as a feature
+            branch (optionally a pull request) or merge it onto <code>main</code>. Nothing is pushed and
+            <code>main</code> is never modified without your explicit choice.</p>
+          <div class="tags"><span class="tag human">Human decision</span><span class="tag">No push without approval</span></div>
+        </div></div>
+      </article>
+
+    </div>
+
+    <div class="legend">
+      <span><span class="dot flow"></span> Automated flow</span>
+      <span><span class="dot human"></span> Human decision point</span>
+      <span><span class="dot gate"></span> Quality &amp; verification gate</span>
+      <span><span class="loopmark">↻</span> Self-correcting loop</span>
+    </div>
+
+    <p class="foot">Default behavior: single-branch integration · per-slice branches or PRs only on explicit request.</p>
+
+  </div>
+</div>
+</body>
+</html>

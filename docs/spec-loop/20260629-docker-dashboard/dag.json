@@ -1,0 +1,59 @@
+{
+  "base_ref": "alpha",
+  "base_sha": "e590fc80dc14182fe8a5cdc3e7648cf0cebf48d4",
+  "shared_constraints": [
+    "PYTHON FALLBACK IS FIRST-CLASS: `python3 scripts/dashboard_server.py [--port N] [--root PATH]` must keep working unchanged when Docker is absent/down. Docker is preferred-when-available, not mandatory.",
+    "SINGLE SOURCE OF TRUTH: the Docker image runs the EXISTING dashboard_server.py (reuse build_server/main and the --port/--root arg surface). Do NOT fork a parallel server.",
+    "SECURITY INVARIANTS (must-not-regress; a violation is a SAFETY concern): (1) the container MUST publish on loopback only: `-p 127.0.0.1:PORT:PORT`, never `-p PORT:PORT`; (2) keep the Host-header allowlist CLOSED — never widen to `*` or add container hostnames; derive it from the advertised/published port, decoupled from the bind host; (3) mount run artifacts READ-ONLY (`:ro`); (4) teardown MUST be scoped to the deterministic spec-loop container name — never an unscoped `docker rm -f`; (5) image runs as NON-ROOT with `--cap-drop ALL`, no `--privileged`, never mount /var/run/docker.sock.",
+    "MULTI-ROOT SAFELY: aggregate runs across repos using MINIMAL per-root `:ro` bind mounts (or a bounded dedicated registry dir) — NO broad `$HOME`/home mount. Preserve per-root realpath/commonpath path-traversal confinement. Namespace run-ids across roots so two repos' identically-named runs don't collide.",
+    "LIFECYCLE: one machine-wide singleton container, deterministic fixed name; idempotent start-if-absent / reuse-if-running (never a second container); the launcher starts the listener and EXITS (holds no shell); explicit `--stop`; prune stale/closed-repo roots from the view so there is no drift.",
+    "TESTS: cover new pure logic with stdlib unittest consistent with scripts/test_dashboard_server.py (ephemeral port 0, no third-party deps). Guard/skip any test that needs a live Docker daemon — CI (.github/workflows/validate.yml) has no Docker.",
+    "DOCS HONESTY: dashboard-serve.md must be rewritten so its read-only/`allowed-tools: [Bash]` prose honestly reflects that Bash now invokes `docker` (dual-use), while the read-only guarantee about RUN STATE remains true."
+  ],
+  "slices": [
+    {
+      "id": "s1",
+      "goal": "Generalize scripts/dashboard_server.py for Docker + multi-root WITHOUT weakening any guarantee. (a) Add a configurable bind host (--bind-host, default 127.0.0.1; 0.0.0.0 only inside the container) and decouple the Host-header allowlist from the bind host by deriving it from an advertised/published port (--advertise-port, default = --port). Binding 0.0.0.0 must NEVER widen the allowlist. (b) Support serving MULTIPLE data roots (aggregate scan across roots) with per-root realpath/commonpath confinement preserved and run-ids namespaced per-root so identically-named runs across repos don't collide (extend the /api/runs and /api/runs/<id> shape accordingly). Keep single-root behavior the default/back-compatible. Cover everything with stdlib unittest matching test_dashboard_server.py (incl. a test that a foreign/'*' Host is still 421 when bound to 0.0.0.0).",
+      "files": ["scripts/dashboard_server.py", "scripts/test_dashboard_server.py"],
+      "subsystems": ["dashboard-server-data-layer", "dashboard-server-http-layer"],
+      "deps": [],
+      "risk_tier": 3,
+      "depth": 0,
+      "parent": null,
+      "status": "complete"
+    },
+    {
+      "id": "s2",
+      "goal": "Add a minimal Dockerfile (+ .dockerignore) at repo root that bakes in scripts/dashboard_server.py and scripts/dashboard_assets/ and CMDs the EXISTING server with --bind-host 0.0.0.0. Use a small python-slim/alpine base (stdlib only, no pip installs). Image runs as a NON-ROOT user. No compose, no multi-arch, no healthcheck, no registry publish. Assets baked into the image (not mounted) so UI and server versions never drift. Document the required run invocation contract in a comment/README note: publish 127.0.0.1:PORT:PORT and mount artifacts :ro (the launcher slice enforces these at runtime).",
+      "files": ["Dockerfile", ".dockerignore"],
+      "subsystems": ["docker-image"],
+      "deps": ["s1"],
+      "risk_tier": 2,
+      "depth": 0,
+      "parent": null,
+      "status": "complete"
+    },
+    {
+      "id": "s3",
+      "goal": "Add scripts/dashboard_launcher.py (pure-stdlib, unit-testable) + rewrite plugins/spec-loop/commands/dashboard-serve.md to drive: Docker-preferred-with-python-fallback launch of a SINGLE machine-wide singleton container. Behavior: detect Docker daemon; if up -> ensure the singleton (deterministic fixed name) is running (build image if needed, `docker run -d` with `-p 127.0.0.1:PORT:PORT`, per-root `:ro` mounts, --cap-drop ALL, non-root) or reuse it if already running; register THIS repo's docs/spec-loop root into the aggregated view (recreating the singleton with the union of minimal per-root :ro mounts when the active root set changes); print the URL and EXIT (hold no shell). If Docker is absent/down -> fall back to the existing `python3 dashboard_server.py` path with a clear message. Provide `--stop` (scoped to the singleton name only). Prune stale/closed-repo roots so there is no drift. Split the pure decision logic (daemon detection, name derivation, mount-set computation, arg building, stale-root pruning) out from the docker subprocess calls so it is unit-tested without a live daemon; guard/skip daemon-dependent tests. Keep the launcher's docker teardown scoped — never an unscoped rm -f.",
+      "files": ["scripts/dashboard_launcher.py", "scripts/test_dashboard_launcher.py", "plugins/spec-loop/commands/dashboard-serve.md"],
+      "subsystems": ["dashboard-launcher", "spec-loop-command"],
+      "deps": ["s1", "s2"],
+      "risk_tier": 3,
+      "depth": 0,
+      "parent": null,
+      "status": "pending"
+    },
+    {
+      "id": "s4",
+      "goal": "Update scripts/dashboard_assets/index.html so the aggregated multi-root view groups/labels each run by its source repo/root and renders the namespaced run-ids from s1's API without collision, degrading gracefully to the single-root layout when only one root is present. Read-only display only; no new fetch verbs. Match the existing dark-theme UI voice and the 2.5s poll model.",
+      "files": ["scripts/dashboard_assets/index.html"],
+      "subsystems": ["dashboard-client"],
+      "deps": ["s1"],
+      "risk_tier": 2,
+      "depth": 0,
+      "parent": null,
+      "status": "complete"
+    }
+  ]
+}

@@ -26,6 +26,9 @@ scripts/dashboard_launcher.py:551-552    # __main__ entry shim (if __name__/sys.
 scripts/dashboard_server.py:663-664      # __main__ entry shim (if __name__/sys.exit(main())); not run as __main__ under unittest
 scripts/pr_resolver.py:488-489           # __main__ entry shim (if __name__/sys.exit(main())); not run as __main__ under unittest
 scripts/release.py:194-195               # __main__ entry shim (if __name__/sys.exit(main())); not run as __main__ under unittest
-scripts/validate_marketplace.py:385-386  # __main__ entry shim (if __name__/sys.exit(main())); not run as __main__ under unittest
+scripts/validate_marketplace.py:417-418  # __main__ entry shim (if __name__/sys.exit(main())); not run as __main__ under unittest
+scripts/council_contracts.py:295-296     # __main__ entry shim (if __name__/sys.exit(main())); not run as __main__ under unittest
+scripts/spec_loop_guard.py:231-232       # __main__ entry shim (if __name__/sys.exit(main())); not run as __main__ under unittest
+scripts/quality_gate.py:1056-1057        # __main__ entry shim (if __name__/sys.exit(main())); not run as __main__ under unittest
 
 scripts/dashboard_server.py:654-659      # blocking serve_forever() try/except KeyboardInterrupt/finally daemon tail; cannot run to completion under a unit test

@@ -1,6 +1,6 @@
 ---
 name: iron-council
-description: Use when the spec-loop controller has a fresh user request to vet, or a slice worker has written a plan and is about to execute it — convenes the five-member Iron Council to challenge the request/plan, surface discrepancies, and return opinionated verdicts, then aggregates them into ENDORSE / ENDORSE_WITH_CONCERNS / OBJECT and routes an OBJECT through escalation-gate to the human.
+description: Use when the spec-loop controller has a fresh user request to vet, or a slice worker has written a plan and is about to execute it — convenes the Iron Council (full five at intake; tier-scaled composition at pre-execution) to challenge the request/plan, surface discrepancies, and return opinionated verdicts, then aggregates them into ENDORSE / ENDORSE_WITH_CONCERNS / OBJECT and routes an OBJECT through escalation-gate to the human.
 ---
 
 # The Iron Council — challenge the request, vet every plan
@@ -25,6 +25,12 @@ Each council member is its **own agent** with its **own mandate**. They are
 the convening layer aggregates them and decides whether to proceed, fold in
 concerns, or halt and lift the decision to the human.
 
+**Composition is tier-scaled at pre-execution.** Intake always convenes the full
+five. At pre-execution the slice's risk tier decides the composition via
+`review-depth-map` (Tier 1 → `pragmatist,guardian`; Tier 2 → full five; Tier 3 →
+full five at high effort). The guardian is convened on **every** council, so the
+lone-SAFETY veto never loses coverage.
+
 This skill **composes with** `escalation-gate`: a council OBJECT is one of that
 gate's surface triggers (`council-objection`). The council does not prompt the
 human itself — it routes through the same batched-escalation machinery as
@@ -42,37 +48,75 @@ everything else, so background work is never blocked.
 
 ## Convening protocol
 
-1. **Dispatch all five members in a single message** so they deliberate
-   concurrently. Pass each member:
+1. **Pick the composition.** Intake → the full five. Pre-execution → the
+   composition `review-depth-map` maps from the slice's risk tier, recorded in the
+   plan header's `council="..."` field (Tier 1 → `pragmatist,guardian`; Tier 2 →
+   full five; Tier 3 → full five, each member's dispatch carrying an explicit
+   high-effort deep-review mandate). The guardian is always among the convened.
+2. **Assemble ONE shared context packet**, then **dispatch the convened members in
+   a single message** so they deliberate concurrently. The packet is built once and
+   passed **verbatim and identically** to every member, ordered the same at the top
+   of each dispatch prompt — identical long prefixes earn prompt-cache hits when
+   the members go out in one message. It contains:
    - The **subject** under review and its kind: either the verbatim user request
      (intake) or the full slice plan plus the slice object (pre-execution).
-   - The relevant context (request file, plan file, run-state directory path).
+   - The run's `conventions.md` (the persisted Phase 0 exploration summary) — its
+     content if small, else its absolute path.
+   - The `shared_constraints` from `dag.json` (run-wide must-not-regress
+     constraints from intake).
+   - The run-state directory path, and — at pre-execution — the list of files the
+     plan names.
    - This skill's **output contract** (below) so every member replies in the same
      shape.
+   The packet is a **floor, not a ceiling**: members still explore the codebase
+   read-only beyond it wherever their mandate needs.
    - **Nesting rule:** the **controller** is top-level and may dispatch the members
      however it likes, but an advisory gate that blocks the next step is cleanest
      run synchronously in one message. The **slice worker is a subagent** and MUST
      dispatch every member with `run_in_background: false` (the platform forbids
      subagents from backgrounding agents). A single message of synchronous Task
      calls still runs them concurrently.
-2. Each member inspects the subject (and the codebase, read-only) and returns its
+3. Each member inspects the subject (and the codebase, read-only) and returns its
    verdict in the output contract shape.
-3. The convening layer **aggregates** the five verdicts (rules below) into a single
-   council verdict and acts on it.
+4. **Validate every reply mechanically — never hand-parse.** Pipe each member's
+   full reply text through the bundled validator:
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/council_contracts.py" validate-member`
+   (reply on stdin; prints the normalized verdict JSON on exit 0).
+   - Invalid (exit 1) → **re-dispatch that member once** with a note quoting the
+     validator's errors.
+   - Still invalid → **fail closed**: synthesize
+     `{"member": "<name>", "verdict": "OBJECT", "discrepancies": [], "feedback": [],
+     "blocker": {"text": "invalid council output after re-dispatch", "safety": false}}`
+     for that member and log one line to `decisions-log.md`. Never treat an
+     unreadable reply as an ENDORSE.
+5. The convening layer **aggregates** the normalized verdicts by piping them, as
+   one JSON array, through
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/council_contracts.py" aggregate
+   --expect <the convened composition, e.g. pragmatist,guardian>`.
+   `--expect` pins the composition: a missing, duplicate, or uninvited verdict is
+   exit 2, so a member that never reported cannot silently vanish from the
+   majority math. The rules below remain the normative spec; the script is their
+   mandatory executor (exit 2 means the input was malformed or incomplete — do not
+   proceed without a verdict). Act on the returned council verdict.
 
 ## Member output contract
 
-Every council member MUST end its reply with exactly this block:
+Every council member MUST end its reply with exactly one fenced ```json block
+in this shape (the LAST fenced json block in the reply is the verdict of
+record):
 
+```json
+{
+  "member": "<skeptic | architect | pragmatist | guardian | historian>",
+  "verdict": "<ENDORSE | ENDORSE_WITH_CONCERNS | OBJECT>",
+  "discrepancies": ["<each gap/contradiction between what was asked and what would actually be sound — [] if none>"],
+  "feedback": ["<constructive, specific, opinionated guidance — name the file/step/decision>"],
+  "blocker": {"text": "<only if verdict is OBJECT: the single concern that makes this unworthy, plus the recommended remedy>", "safety": false}
+}
 ```
-COUNCIL MEMBER: <skeptic | architect | pragmatist | guardian | historian>
-VERDICT: <ENDORSE | ENDORSE_WITH_CONCERNS | OBJECT>
-DISCREPANCIES:
-- <each gap/contradiction between what was asked and what would actually be sound — or "none">
-FEEDBACK:
-- <constructive, specific, opinionated guidance — name the file/step/decision>
-BLOCKER: <only if VERDICT is OBJECT: the single concern that makes this unworthy, plus the recommended remedy. Mark "SAFETY" if it is irreversible data loss, a security hole, or a broken public contract.>
-```
+
+Rules: `blocker` is `null` unless the verdict is `OBJECT`; set `"safety": true`
+only for irreversible data loss, a security hole, or a broken public contract.
 
 Verdict meanings:
 - **ENDORSE** — sound as proposed; proceed.
@@ -86,10 +130,11 @@ carries a concrete remedy, not just a complaint. Members must not rubber-stamp �
 
 ## Aggregation — the council verdict
 
-Count the five members' verdicts:
+Count the convened N members' verdicts:
 
-- **Council OBJECT (halt)** when **a majority object** — **≥3 of 5** members return
-  OBJECT (for a reduced council of N members, strictly more than half), **OR** when
+- **Council OBJECT (halt)** when **a majority object** — **strictly more than half
+  of the N convened** members return OBJECT (≥3 of 5 for a full council; on a
+  2-member Tier 1 council, both), **OR** when
   **any single member returns an OBJECT marked `SAFETY`** (irreversible data loss,
   security hole, or broken public contract). A lone safety objection is enough —
   this mirrors `escalation-gate`'s rule that anything a reasonable reviewer could
@@ -104,9 +149,11 @@ Count the five members' verdicts:
 ## Routing the verdict
 
 ### Council ENDORSE
-Append one line to `decisions-log.md` and proceed:
+Append one line to `decisions-log.md` and proceed (always name the composition —
+`<n>/<N>` where N is the convened count):
 ```
 [<slice-id|intake>] COUNCIL: ENDORSE — 5/5, no concerns.
+[<slice-id>] COUNCIL: ENDORSE — 2/2 (tier-1: pragmatist,guardian), no concerns.
 ```
 
 ### Council ENDORSE_WITH_CONCERNS
@@ -152,7 +199,7 @@ the council's reasoning attached):
 ```
 ## [<slice-id|intake>] Iron Council objects: <short title>   (status: OPEN)
 - Trigger: council-objection
-- Council verdict: OBJECT (<n>/5 object<, includes SAFETY blocker if any>)
+- Council verdict: OBJECT (<n>/<N> object<, includes SAFETY blocker if any>; convened: <member,member,...>)
 - Objecting members: <skeptic/guardian/...> — <one-line blocker each>
 - The decision: <the precise question for the human>
 - Options:
@@ -168,6 +215,11 @@ slice re-runs from its plan with the resolution applied; the council is **not**
 re-convened on an answer the human has already adjudicated).
 
 ## Red flags (you are misusing the council)
+- **Hand-parsing or eyeballing a member reply** instead of running it through
+  `council_contracts.py validate-member` / `aggregate` — the script is the
+  contract's executor.
+- **Treating an invalid member reply as ENDORSE** — after one re-dispatch it is
+  a synthesized non-SAFETY OBJECT, never a pass.
 - Letting the council **prompt the human directly** — it never does; it routes
   through `escalation-gate`'s batched machinery.
 - **Halting on ENDORSE_WITH_CONCERNS** — minority/non-safety concerns are folded
@@ -180,4 +232,10 @@ re-convened on an answer the human has already adjudicated).
 - Re-convening the council on a slice the human has already adjudicated via an
   answered escalation.
 - Skipping the council to "save time" — both convenings (intake and per-plan) are
-  mandatory parts of the loop.
+  mandatory parts of the loop. Tier scaling changes the composition, never whether
+  the council convenes.
+- **Convening a council without the guardian**, or scaling down the intake
+  council — Tier 1's reduced composition is `pragmatist,guardian`, and intake is
+  always the full five.
+- Aggregating without `--expect` — an absent member's verdict must fail closed,
+  not silently shrink N.

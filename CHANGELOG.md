@@ -23,6 +23,60 @@ prior build. Pinned entries map to git tags `v<version>`.
 
 ## [Unreleased]
 ### Added
+- **Structured JSON contracts (fail-closed).** Iron Council members now end their replies
+  with a fenced ```json verdict block, and slice workers write a machine-readable status
+  sidecar (`docs/spec-loop/<run-id>/slice-<id>-status.json`) that the controller — not the
+  return text — trusts. New stdlib-only `scripts/council_contracts.py`
+  (+ `test_council_contracts.py`) validates member verdicts, executes the aggregation rules
+  (majority OBJECT, single-SAFETY veto, reduced councils), and validates sidecars. Fail-closed
+  throughout: an invalid member reply becomes a non-SAFETY OBJECT after one re-dispatch; a
+  missing/invalid sidecar makes the slice `NEEDS_DECISION`.
+- **Deterministic guardrail hooks.** New `hooks/hooks.json` registers a PreToolUse hook
+  (`scripts/spec_loop_guard.py` + tests) that, while a run's `.active` marker exists,
+  mechanically blocks mid-run `git push` (except `per-slice-pr` mode), broad staging
+  (`git add -A`/`--all`/`.`), commits/merges on `main`/`master`, and any edit to
+  `~/.claude/spec-loop/quality-gate.json` — with deny reasons that name the compliant
+  alternative. Marker lifecycle: `.active` at Phase 1, `.publish-choice` at the publish
+  answer, `.active` → `.done` at run end. The guard fails open on its own errors
+  (defense-in-depth; the skill prompts remain the primary control). Verified empirically
+  that PreToolUse also fires for Bash calls made inside Task subagents, so the guard covers
+  slice workers as well as the controller's main-session operations.
+- **Deterministic quality-gate measurement.** New stdlib-only `scripts/quality_gate.py`
+  (+ `test_quality_gate.py`) measures the slice diff's metrics (cyclomatic/cognitive
+  complexity, method lines, parameters, nesting, class lines, CRAP with coverage) via
+  installed backends (`lizard` preferred, `radon` for Python) or a built-in stdlib analyzer
+  marked `builtin-heuristic` — never installing anything and never fabricating a
+  tool-attributed number. The `quality-gate` skill is now script-first; model heuristics
+  remain only as fallback when the script itself cannot run.
+- **Adversarial review-finding verification.** New `review-finding-verifier` agent: before
+  the auto-fix loop, each blocking review finding gets one read-only verifier that tries to
+  REFUTE it against the actual code (cap 6/round, highest severity first). REFUTED findings
+  are logged with file:line evidence and never burn fix cycles or escalate; CONFIRMED is the
+  default and unreadable verdicts fail closed to CONFIRMED.
+- **Risk-tier-scaled council composition.** The pre-execution Iron Council now scales with
+  the slice's risk tier via `review-depth-map`: Tier 1 convenes a reduced
+  `pragmatist,guardian` council, Tier 2 the full five, Tier 3 the full five with an explicit
+  high-effort deep-review mandate. The guardian sits on every council so the lone-SAFETY veto
+  never loses coverage; intake always convenes the full five. The composition is recorded in
+  the plan header (`council="..."`) and pinned at aggregation by the new
+  `council_contracts.py aggregate --expect <members>` check — a missing, duplicate, or
+  uninvited verdict exits 2 (fail closed) instead of silently shrinking the majority math.
+- **One shared context bundle per convening.** The controller's Phase 0 exploration is now
+  persisted as `docs/spec-loop/<run-id>/conventions.md` (reusable helpers, patterns,
+  conventions, key-file map) and handed to every slice worker and every council convening;
+  the convening layer assembles ONE context packet (subject, `conventions.md`,
+  `shared_constraints`, run-state path, files the plan names) passed identically to all
+  members — same prefix, prompt-cache friendly — instead of five agents re-exploring the
+  same files. The previously undocumented `shared_constraints` array in `dag.json` is now
+  part of the contract and flows to workers and councils.
+- **Cross-run learning.** Prior runs' committed artifacts are now read as precedent: the
+  historian enumerates earlier `docs/spec-loop/*/runbook.md`, `decisions-log.md`, and
+  `status: ANSWERED` escalation blocks and flags re-litigation of settled decisions (citing
+  run-id + escalation title), and `escalation-gate` runs a precedent check before surfacing —
+  a squarely-applicable prior human answer resolves autonomously (logged with the precedent),
+  a near-match becomes the escalation's recommended default. A question answered in run N is
+  not asked again in run N+1.
+
 - **Obsidian knowledge graph (opt-in).** `/spec-loop` can now project a run's decisions,
   architecture patterns, system context, and domain knowledge into an Obsidian vault as
   linked markdown notes (`[[wikilinks]]` + YAML frontmatter) that **accumulate and cross-link
@@ -41,6 +95,13 @@ prior build. Pinned entries map to git tags `v<version>`.
     `runbook` write notes — **slice workers never touch the vault**, so the loop's parallel
     execution is unaffected. The runbook records a `knowledge_graph` block in its front-matter
     for traceability.
+
+### Changed
+- `escalation-gate` now lists `quality-gate-block` as its fifth surface trigger — the
+  quality-gate skill and slice worker already emitted it; the enum was missing it.
+- `validate_marketplace.py` also checks `${CLAUDE_PLUGIN_ROOT}` references inside
+  `hooks/*.json` (JSON-decoded, so escaped quotes in hook commands are handled) so an
+  unshipped hook script can never reach a release.
 
 ## [1.2.1] - 2026-07-06
 ### Added

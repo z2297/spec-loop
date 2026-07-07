@@ -72,4 +72,7 @@ just owns the config file.
 - `measurement` is `hybrid` (real analyzer when installed, else `refactor-analysis`
   heuristics). `crap_score` needs coverage data; the gate skips it with a note when no
   coverage report is available.
+- Measurement is executed by the bundled `scripts/quality_gate.py` (script-first —
+  it produces the JSON report of record; model heuristics are only a fallback when
+  the script cannot run). This command still only edits the config.
 - This command never measures code or refactors — it only edits the config.

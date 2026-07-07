@@ -44,36 +44,60 @@ These mirror the `refactor-analysis` skill's thresholds so the heuristic fallbac
 (Step 2) and any custom config stay consistent. `custom_gates` from the config are
 also evaluated (see Step 3).
 
-## Step 2 — Measure (hybrid: real tools first, heuristics otherwise)
+## Step 2 — Measure (run the bundled script; it is the measurement of record)
 
 Measure **only the slice's changed code** (the diff's added/modified
 methods/files), not the whole repo.
 
-1. **Detect language + available tooling**, then prefer a real analyzer when one is
-   installed (gives authoritative numbers). Examples (use what exists; do not
-   install anything):
-   - JS/TS → `eslint` with `complexity`/`max-depth`/`max-lines-per-function` rules,
-     or `npx eslintcc`.
-   - Python → `radon cc`/`radon mi`, `flake8` complexity.
-   - Many languages → `lizard` (CCN, length, parameter count).
-   - C#/.NET → Roslyn analyzers / `dotnet build` analyzer output, or an installed
-     metrics tool. (No universal CLI — fall back to heuristics if none present.)
-   - Coverage for **CRAP**: read an existing coverage report (lcov, cobertura,
-     `coverage.xml`, etc.) produced by the slice's test run. If none exists, **skip
-     CRAP** and note it; do not fabricate a coverage number.
-2. **Fallback — no tool for this language:** invoke the `refactor-analysis` skill
-   (or apply its checklists directly) to estimate the same metrics by reading the
-   changed code. Mark these results as **heuristic** in the log.
-3. **Record** each measured metric with its value, the threshold, pass/fail, and the
-   source (tool name + version, or `heuristic`). Quote real tool output as evidence.
+1. **Run the gate script from the slice worktree** — this is the measurement of
+   record, not an eyeballed estimate:
+
+   ```
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/quality_gate.py" \
+     --config <config-path> --base <base_sha> [--head HEAD] [--repo-dir .] \
+     [--coverage <report>]
+   ```
+
+   It discovers the changed line ranges from `git diff`, measures only the
+   changed functions/files, and emits a single JSON report on stdout:
+   `{version, backends, base, head, config, findings:[{file, function, metric,
+   value, threshold, pass, source}], skipped:[…], summary:{pass, failures}}`.
+   Its exit code is `0` (all thresholds pass), `1` (one or more fail), or `2`
+   (usage/git/config error). The script itself:
+   - prefers a real analyzer when installed (`lizard` for many languages;
+     `radon cc` for Python when lizard is absent) and **never installs
+     anything** — every finding carries a `source` (the tool name, or
+     `builtin-heuristic` for the transparent stdlib fallback used per-file when
+     no tool covers it). `cognitive_complexity` is always heuristic (or listed
+     in `skipped`) and is never attributed to a tool.
+   - computes **CRAP** only when a coverage report is found (`--coverage`, else
+     it probes the repo root for `coverage.xml` / `lcov.info` / `cobertura*.xml`);
+     otherwise it lists CRAP in `skipped` with reason `"no coverage report"`. It
+     never fabricates a coverage number.
+   - evaluates **metric-form** custom gates directly; **command-form** gates are
+     listed in `skipped` for the skill to run (Step 3).
+2. **Read the JSON report** — the `findings`/`summary` are the authoritative
+   metrics. Do not re-measure by hand when the script ran.
+3. **Fallback — only when the script itself cannot run** (exit `2`, or `python3`
+   missing): invoke the `refactor-analysis` skill (or apply its checklists
+   directly) to estimate the same metrics by reading the changed code, using the
+   default thresholds table above. Mark these results **explicitly as heuristic**
+   in the log and note *why* the script did not run. This tool-menu / by-reading
+   path is a fallback, not the primary measurement.
+4. **Record** each measured metric with its value, threshold, pass/fail, and
+   `source` from the report (tool name or `builtin-heuristic`; `heuristic` for
+   the Step-2.3 fallback). Quote the script's JSON summary as evidence.
 
 ## Step 3 — Evaluate custom gates
 
-For each entry in `custom_gates`:
-- **Metric form** (`{name, metric, threshold}`) — evaluate like a built-in threshold.
-- **Command form** (`{name, command, pass_when}`) — run the command scoped to the
-  changed files; pass when it matches `pass_when` (e.g. `exit 0`). Treat a missing
-  interpreter/tool as a skip-with-note, not a failure.
+- **Metric form** (`{name, metric, threshold}`) — **already evaluated by the
+  script** in Step 2; its pass/fail findings are in the report (each tagged with
+  its `gate` name). Do not re-evaluate these by hand.
+- **Command form** (`{name, command, pass_when}`) — the script does **not** run
+  these (it lists them in `skipped` with reason `command-form gate — evaluated
+  by the skill`). Run each command here, scoped to the changed files; pass when
+  it matches `pass_when` (e.g. `exit 0`). Treat a missing interpreter/tool as a
+  skip-with-note, not a failure.
 
 ## Step 4 — Bounded, behavior-preserving refactor loop
 
@@ -93,7 +117,9 @@ Otherwise, for each failing item, run a refactor pass (budget =
    discipline: the existing tests must stay green through every pass. Re-run the
    slice's tests after each refactor; if a change reddens them or alters behavior,
    **revert that change** and try a different transformation.
-3. **Re-measure** the failing items (Step 2). Stop early once all pass.
+3. **Re-measure** by **re-running the gate script** (Step 2) against the current
+   worktree; its fresh report is the authoritative check. Stop early once all
+   items pass.
 
 If the budget is exhausted with any item still failing:
 - Consult `escalation-gate` with trigger **`quality-gate-block`**.
@@ -105,9 +131,10 @@ If the budget is exhausted with any item still failing:
 
 ## Step 5 — Evidence
 
-Always log to `decisions-log.md`: the metrics table (value vs threshold, source),
-PASS/FAIL, refactor passes used, and before→after deltas for anything refactored.
-The slice report's `Quality:` line summarizes this.
+Always log to `decisions-log.md`: the gate script's JSON `summary` (and the
+relevant `findings`/`skipped`) quoted verbatim as the metrics of record, PASS/FAIL,
+refactor passes used, and before→after deltas for anything refactored. The slice
+report's `Quality:` line summarizes this.
 
 ## Red flags (never)
 - Weakening thresholds or editing `quality-gate.json` to make a slice pass.
@@ -117,3 +144,6 @@ The slice report's `Quality:` line summarizes this.
   and note instead.
 - Looping refactors past `refactor_attempts` instead of escalating.
 - Measuring the whole repo instead of just the slice's changed code.
+- Eyeballing metrics by hand when the gate script ran successfully — its JSON
+  report is the measurement of record; the by-reading path is only for when the
+  script itself cannot run (exit 2, `python3` missing).

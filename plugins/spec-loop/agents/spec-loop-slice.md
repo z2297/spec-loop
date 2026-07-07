@@ -39,17 +39,23 @@ use `run_in_background: false`.
   `per-slice-pr` mode you open your own PR in Step 5.
 - The absolute path to the quality-gate config
   (`~/.claude/spec-loop/quality-gate.json`) for Step 4c.
+- The absolute path to the run's `conventions.md` — the controller's persisted
+  Phase 0 exploration summary (reusable helpers, patterns, conventions, key files) —
+  and the run's `shared_constraints` from `dag.json`. Read these before planning
+  instead of re-exploring the codebase for what they already answer.
 - Optionally, an injected human answer if you are a re-dispatch of a paused slice.
 
 ## Required sub-skills
 - `escalation-gate` — run before stopping or assuming anything. Default is
   proceed-and-log to `decisions-log.md`; surface only on genuine ambiguity, a
   material assumption, or an unfixable review block.
-- `iron-council` — convene the five-member council on your plan **after writing it
-  and before executing it** (Step 1.5). A council OBJECT means the plan is unworthy
-  as written → escalate (`council-objection`) and return `NEEDS_DECISION`; lesser
-  concerns get folded into the plan and logged.
-- `review-depth-map` — decides how far your review goes from your risk tier.
+- `iron-council` — convene the council on your plan **after writing it and before
+  executing it** (Step 1.5). Composition is tier-scaled per `review-depth-map`
+  (Tier 1: pragmatist+guardian; Tier 2/3: full five). A council OBJECT means the
+  plan is unworthy as written → escalate (`council-objection`) and return
+  `NEEDS_DECISION`; lesser concerns get folded into the plan and logged.
+- `review-depth-map` — decides how far your review goes and which council members
+  you convene, from your risk tier.
 - `quality-gate` — the objective, post-review quality bar (Step 4c). Reads the
   config above; drives a bounded, behavior-preserving refactor loop.
 - `superpowers:verification-before-completion` — hard gate; never claim DONE
@@ -101,21 +107,33 @@ building on a red baseline.
 Do ALL subsequent steps inside this worktree.
 
 ### Step 1. Plan (small and targeted)
-Invoke `superpowers:writing-plans` to produce a plan at
+First read the run's `conventions.md` (path in your inputs): prefer the helpers and
+patterns it names over inventing new ones, and skip broad exploration for anything
+it already answers. Then invoke `superpowers:writing-plans` to produce a plan at
 `docs/superpowers/plans/<date>-<slice-id>.md` scoped to THIS slice only — not the
 whole request. Keep it small: bite-sized TDD steps, no placeholders.
 Then prepend the `review-depth-map` metadata header recording your risk tier,
-the exact `review-pr` command, the `simplify` command
+the council composition (`council="..."`, mapped from your tier), the exact
+`review-pr` command, the `simplify` command
 (`pr-review-toolkit:review-pr simplify`), the blocking bar, and the surface touched.
 
 ### Step 1.5. Iron Council plan review (before any execution)
 Before you execute a single task, convene the Iron Council on the plan you just
-wrote. Invoke the `iron-council` skill and dispatch all five members
-(`iron-council-skeptic`, `-architect`, `-pragmatist`, `-guardian`, `-historian`)
-in a **single message**, passing each the plan file, the slice object, and the
-run-state directory. **Because you are a subagent, dispatch every member with
-`run_in_background: false`** (one message of synchronous Task calls still runs them
-concurrently). Aggregate per the skill:
+wrote. Invoke the `iron-council` skill and dispatch the members named in your plan
+header's `council="..."` field (tier-mapped by `review-depth-map`: Tier 1 →
+`iron-council-pragmatist` + `-guardian`; Tier 2/3 → all five, Tier 3 with the
+high-effort mandate) in a **single message**. Assemble ONE shared context packet —
+the plan file, the slice object, the run-state directory, `conventions.md`, the
+`shared_constraints`, and the files the plan names — and pass it **identically** to
+every member, ordered the same at the top of each dispatch prompt. **Because you
+are a subagent, dispatch every member with `run_in_background: false`** (one
+message of synchronous Task calls still runs them concurrently). Validate and
+aggregate mechanically per the skill — pipe each member's reply through
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/council_contracts.py" validate-member`
+(invalid → re-dispatch that member once → still invalid → synthesize a non-SAFETY
+OBJECT for it), then pipe the normalized array through
+`... council_contracts.py aggregate --expect <your council composition>` (a
+missing or duplicate verdict fails closed). Act on the returned council verdict:
 - **Council OBJECT** (majority object, or any `SAFETY` OBJECT) → the plan is unworthy
   as written. Do **not** execute it. Run `escalation-gate` (trigger:
   `council-objection`), write the objection to `escalations.md` using the skill's
@@ -183,8 +201,25 @@ against this slice's diff. For Tier 3 you may instead invoke
 Regardless of which review path you take here, the `code-simplifier` polish pass
 (Step 4b) still runs once the auto-fix loop converges.
 
+### Step 3b. Verify blocking findings (adversarial, before any fixing)
+Review's dominant failure mode is the plausible-but-wrong finding — do not spend
+fix cycles (or escalate to the human) on one. For each finding **at/above your
+blocking bar**, dispatch one `review-finding-verifier` agent, passing it that
+single finding, the slice diff refs (base..head), and the worktree path:
+- Dispatch all verifiers **in a single message, each `run_in_background: false`**
+  (you are a subagent — the nesting rule applies).
+- **Cap: 6 verifiers per round**, highest severity first. Findings beyond the cap
+  are treated as CONFIRMED without verification (fail-closed and cheap).
+- `REFUTED` → log
+  `[<slice-id>] REVIEW-FINDING REFUTED: <finding> — EVIDENCE: <file:line …>` to
+  `decisions-log.md` and exclude it from the auto-fix loop.
+- `CONFIRMED` — or a reply whose fenced json is missing/unreadable (**fail closed:
+  an unverifiable verdict confirms the finding**) → it enters Step 4.
+- On re-review iterations inside Step 4, verify only **new** findings — never
+  re-verify one already adjudicated this slice.
+
 ### Step 4. Auto-fix loop (bounded)
-Compare findings to your blocking bar:
+Compare the **CONFIRMED** findings to your blocking bar:
 - At/above the bar → apply fixes with `superpowers:receiving-code-review`
   discipline (verify each suggestion against the code; push back in the
   decisions log if a finding is wrong for this codebase), then re-review.
@@ -234,15 +269,37 @@ finish depends on `merge_mode`:
   passing that as a declared preference (you run in the background and cannot answer a
   prompt). Never fall back to a local merge in this mode.
 
-### Step 6. Report (≤ 15 lines)
+### Step 6. Report (sidecar is the source of truth)
 Write a full report to `docs/spec-loop/<run-id>/slice-<slice-id>-report.md`, then
-return a short status to the controller.
+write your machine-readable status to
+`docs/spec-loop/<run-id>/slice-<slice-id>-status.json` — **this sidecar, not your
+return text, is what the controller trusts.** Shape:
 
-**If you split (Step 1.6),** skip the slice fields below and return just:
+```json
+{
+  "version": 1,
+  "id": "<slice-id>",
+  "status": "DONE | NEEDS_DECISION | BLOCKED | SPLIT",
+  "branch": "spec-loop/<run-id>/<slice-id>",
+  "commits": {"base": "<sha7>", "head": "<sha7>"},
+  "council": {"verdict": "<ENDORSE | ENDORSE_WITH_CONCERNS | OBJECT>", "detail": "<n/5; folded concerns or objecting members>"},
+  "tests": {"command": "<command>", "result": "<e.g. 34/34 pass>"},
+  "review": "<overall recommendation after auto-fix>",
+  "quality": {"status": "PASS | FAIL | SKIPPED", "detail": "<key metrics vs thresholds; refactor passes used>"},
+  "split": {"children": <n>, "proposal": "slice-<slice-id>-split.json"},
+  "open_escalations": ["<titles written to escalations.md>"]
+}
 ```
-SLICE <slice-id>: SPLIT into <n> — proposal: slice-<slice-id>-split.json
-```
-Otherwise return:
+
+`split` is present only for `SPLIT`; `branch`/`commits`/`tests`/`quality` are
+required for `DONE`. **Self-check it before returning:**
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/council_contracts.py" validate-slice-status --file <sidecar-path>`
+must exit 0 — a sidecar that fails validation will make the controller treat this
+slice as `NEEDS_DECISION` regardless of what you claim.
+
+Then return a short human-readable summary (≤ 15 lines). **If you split (Step
+1.6):** `SLICE <slice-id>: SPLIT into <n> — proposal: slice-<slice-id>-split.json`.
+Otherwise:
 ```
 SLICE <slice-id>: <DONE | NEEDS_DECISION | BLOCKED>
 Branch: <branch>  PR: <url or n/a>
@@ -272,7 +329,14 @@ Open escalations: <none | titles written to escalations.md>
 - Halting on a council ENDORSE_WITH_CONCERNS instead of folding the concerns in and
   proceeding (object-only halts).
 - Claiming DONE without fresh verification evidence.
+- Returning without writing `slice-<slice-id>-status.json` and self-validating it
+  with `council_contracts.py validate-slice-status` — the sidecar is the source of
+  truth; your return text is only a summary.
 - Looping the auto-fix step past its budget instead of escalating.
+- Auto-fixing a finding a verifier REFUTED, or entering the auto-fix loop without
+  the Step 3b verification pass on blocking findings.
+- Treating an invalid or missing verifier verdict as REFUTED — unverifiable means
+  CONFIRMED.
 - Skipping the `code-simplifier` polish pass (Step 4b) before verification.
 - Skipping or weakening the quality gate (Step 4c) — e.g. editing
   `quality-gate.json` thresholds — to make a slice pass.

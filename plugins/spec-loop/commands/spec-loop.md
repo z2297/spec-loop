@@ -25,10 +25,11 @@ because you are the only layer that can interactively ask the human anything.
   (3) a review BLOCK that survived the auto-fix loop.
 - **REQUIRED SUB-SKILL:** `review-depth-map` decides how far each slice's review
   goes, based on the slice's risk tier.
-- **REQUIRED SUB-SKILL:** `iron-council` convenes a five-member adversarial council
-  that challenges the work before effort is spent on it — once on the **user
-  request** at intake (you run this), and once on **every slice plan** before
-  execution (the slice worker runs this). The council surfaces discrepancies and
+- **REQUIRED SUB-SKILL:** `iron-council` convenes an adversarial council that
+  challenges the work before effort is spent on it — once on the **user request**
+  at intake with the full five members (you run this), and once on **every slice
+  plan** before execution with a composition scaled to the slice's risk tier
+  (the slice worker runs this; Tier 1 convenes only pragmatist + guardian). The council surfaces discrepancies and
   returns opinionated verdicts; a majority OBJECT (or any single `SAFETY` OBJECT)
   means the work is **unworthy as proposed** and is lifted to you (the orchestrator)
   to prompt the human — via `escalation-gate`'s `council-objection` trigger. Lesser
@@ -114,11 +115,26 @@ proceed without them.
 4. Restate the request in your own words (per the user's global CLAUDE.md).
 5. Explore the codebase to find reusable functions, patterns, and conventions —
    launch up to 3 `Explore` agents in parallel. Prefer reuse over new code.
-6. **Convene the Iron Council on the request (intake).** Before decomposing,
-   invoke the `iron-council` skill and dispatch all five members
-   (`iron-council-skeptic`, `-architect`, `-pragmatist`, `-guardian`,
-   `-historian`) on the **verbatim user request**, in a single message so they
-   deliberate concurrently. Aggregate their verdicts per the skill:
+   **Distill their findings into a conventions summary** (reusable helpers and
+   functions with paths, established patterns, naming/testing/layout conventions,
+   a key-file map): hold it now, pass it to the intake council in step 6, and
+   persist it as `docs/spec-loop/<run-id>/conventions.md` in Phase 1.3 — every
+   slice worker and council convening reads it instead of re-exploring.
+6. **Convene the Iron Council on the request (intake).** Intake always convenes
+   the full five — tier-scaled composition applies only at pre-execution (there is
+   no tier before decomposition). Before decomposing, invoke the `iron-council`
+   skill and dispatch all five members (`iron-council-skeptic`, `-architect`,
+   `-pragmatist`, `-guardian`, `-historian`) in a single message so they
+   deliberate concurrently, passing every member the **same context packet** —
+   the verbatim user request plus the step 5 conventions summary, placed
+   identically at the start of each member's prompt (identical prefixes earn
+   prompt-cache hits). Validate and aggregate mechanically per the skill —
+   pipe each member's reply through
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/council_contracts.py" validate-member`
+   (invalid → re-dispatch that member once → still invalid → synthesize a
+   non-SAFETY OBJECT for it), then pipe the normalized array through
+   `... council_contracts.py aggregate --expect skeptic,architect,pragmatist,guardian,historian`
+   (a missing or duplicate verdict fails closed). Act on the returned council verdict:
    - **Council OBJECT** (majority object, or any `SAFETY` OBJECT) → the request is
      unworthy as posed. Run `escalation-gate` (trigger: `council-objection`) and add
      the objection to the **up-front batched question round** in step 8 — do not
@@ -170,8 +186,17 @@ proceed without them.
    - Record the run's **merge mode** (`single-branch` default, or `per-slice-pr`) to
      pass to every slice.
 3. Create `docs/spec-loop/<run-id>/` and write:
+   - `.active` — the run marker (one line: ISO timestamp + run-id). While this file
+     exists, the plugin's bundled PreToolUse hook (`spec_loop_guard.py`)
+     deterministically blocks mid-run pushes, broad staging, main-branch
+     commits/merges, and quality-gate config edits. It is deleted (renamed `.done`)
+     when the run ends and is **never committed**.
    - `request.md` — the original request, verbatim.
-   - `dag.json` — `{ base_ref, base_sha, base_branch, merge_mode, slices: [...] }` where `base_ref` is the integration branch, `base_branch` is what it was cut from, `merge_mode` is `"single-branch"` or `"per-slice-pr"`, and each slice is `{id, goal, files, subsystems, deps:[ids], risk_tier:1|2|3, depth:0, parent:null, status:"pending"}`. Apply `--risk-floor` as the minimum tier. Assign tiers using `review-depth-map` heuristics. `depth` tracks split generation (intake slices = `0`); `parent` links a split child to the slice it came from. `status` may also become the terminal value `"split"` (Phase 3) when a slice is replaced by its children.
+   - `dag.json` — `{ base_ref, base_sha, base_branch, merge_mode, shared_constraints: [...], slices: [...] }` where `base_ref` is the integration branch, `base_branch` is what it was cut from, `merge_mode` is `"single-branch"` or `"per-slice-pr"`, `shared_constraints` is the run-wide list of must-not-regress constraints distilled from intake (council concerns folded in, human answers, invariants every slice must preserve — `[]` if none), and each slice is `{id, goal, files, subsystems, deps:[ids], risk_tier:1|2|3, depth:0, parent:null, status:"pending"}`. Apply `--risk-floor` as the minimum tier. Assign tiers using `review-depth-map` heuristics. `depth` tracks split generation (intake slices = `0`); `parent` links a split child to the slice it came from. `status` may also become the terminal value `"split"` (Phase 3) when a slice is replaced by its children.
+   - `conventions.md` — the Phase 0 exploration summary from step 5 (reusable
+     helpers with paths, established patterns, conventions, key-file map). Written
+     once here; read by every slice worker and every council convening for the
+     rest of the run instead of re-exploring.
    - `escalations.md` — start empty (header only).
    - `decisions-log.md` — start empty (header only).
 4. Sanity-check the DAG: no cycles, every `deps` id exists. If a cycle exists, that is a decomposition error — fix it yourself (collapse the cyclic slices into one) and log it.
@@ -198,8 +223,10 @@ background dispatch to work below depth 1.
    run concurrently without blocking the terminal (per the user's saved
    preference). Pass each agent: its slice object, the `run-id`, the absolute
    path to `docs/spec-loop/<run-id>/`, its risk tier, `base_ref` (the integration
-   branch), the run's `merge_mode` (`single-branch` | `per-slice-pr`), and the
-   absolute path to the quality-gate config (`~/.claude/spec-loop/quality-gate.json`).
+   branch), the run's `merge_mode` (`single-branch` | `per-slice-pr`), the
+   absolute path to the quality-gate config (`~/.claude/spec-loop/quality-gate.json`),
+   the absolute path to `docs/spec-loop/<run-id>/conventions.md`, and the run's
+   `shared_constraints` from `dag.json`.
    The worker's first action is to create a clean dedicated worktree from the current
    tip of `base_ref` under `.worktrees/spec-loop/<run-id>/<slice-id>` — before any
    other work. In `single-branch` mode the worker does **not** merge or push; it
@@ -215,7 +242,14 @@ background dispatch to work below depth 1.
 
 ## Phase 3 — Collect & gate (wave boundary)
 
-1. When the wave's background agents report, read each slice's returned status:
+1. When the wave's background agents report, read each slice's **status sidecar**
+   `docs/spec-loop/<run-id>/slice-<id>-status.json` — the sidecar, not the agent's
+   return text (which is only a human-readable summary), is the source of truth.
+   Validate it first:
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/council_contracts.py" validate-slice-status --file <path>`.
+   **Missing or invalid sidecar → treat the slice as `NEEDS_DECISION`** (fail
+   closed — same bar as the "DONE without evidence" rule in step 2). Then route by
+   its `status`:
    - `DONE` → set the slice `status:"complete"` in `dag.json`.
    - `SPLIT` → the slice is two-or-more shippable changes; ingest its children (step 3).
    - `NEEDS_DECISION` → leave it `pending`; its escalation is in `escalations.md`.
@@ -328,8 +362,8 @@ verified the slices **together**. This phase does, before the run is called comp
    any push/merge:
 
    ```
-   git add -- docs/spec-loop/<run-id>/
-   git status --short        # verify ONLY docs/spec-loop/<run-id>/ is staged
+   git add -- docs/spec-loop/<run-id>/ ':(exclude)docs/spec-loop/<run-id>/.active' ':(exclude)docs/spec-loop/<run-id>/.publish-choice' ':(exclude)docs/spec-loop/<run-id>/.done'
+   git status --short        # verify ONLY docs/spec-loop/<run-id>/ is staged (and no marker files)
    git commit -m "docs(spec-loop): runbook + run state for <run-id>"
    ```
 
@@ -361,9 +395,15 @@ verified the slices **together**. This phase does, before the run is called comp
    2. **Merge onto `main`** — locally `git checkout main && git merge --no-ff
       <integration-branch>`; offer to push `main` afterward.
    3. **Leave it local** — do nothing; the branch stays for the human to handle.
-   Perform the chosen action and nothing more — never push or touch `main` without an
-   explicit choice. *(In `per-slice-pr` mode the PRs are already open: skip this
-   prompt and just report the PR list.)*
+   **Immediately after the human answers and before performing the action**, write
+   `docs/spec-loop/<run-id>/.publish-choice` (one line: the chosen option) — the
+   bundled guard hook blocks pushes and main-branch merges until this marker
+   exists. Perform the chosen action and nothing more — never push or touch `main`
+   without an explicit choice. **After the action completes**, rename `.active` →
+   `.done` (`mv docs/spec-loop/<run-id>/.active docs/spec-loop/<run-id>/.done`) so
+   the guard disengages. *(In `per-slice-pr` mode the PRs are already open: skip
+   this prompt, just report the PR list, and rename `.active` → `.done` at that
+   point.)*
 
 When Phase 5 is green, the runbook committed (step 5), and the publish choice handled
 (step 6), the run's **final terminal output IS the Executive Readout** returned by the
@@ -377,8 +417,9 @@ integration-gate result) lives in that file.
 ## Resume
 
 For `--resume <run-id>`: read `docs/spec-loop/<run-id>/dag.json`, recover `base_ref`
-(the integration branch) and `merge_mode`, and **check out `base_ref`** so the
-controller resumes on the singular branch (clean-tree guard as in Phase 1). Skip all
+(the integration branch) and `merge_mode`, recreate the `.active` marker if it is
+absent (the guard hook must cover the resumed run), and **check out `base_ref`** so
+the controller resumes on the singular branch (clean-tree guard as in Phase 1). Skip all
 terminal slices (`complete` and `split` parents), drain any `ANSWERED` escalations
 into re-dispatches, and continue from the first wave that has runnable slices. If
 every slice is already terminal, go straight to the Phase 5 integration gate — which
@@ -400,5 +441,11 @@ commit (content unchanged), skip the empty commit and proceed to the publish pro
   publish choice (Phase 5, step 6).
 - Never stage the runbook commit with `git add -A`/`git add .`/a broad pathspec — the
   run-state artifacts are untracked-not-ignored, so stage ONLY the run directory
-  (`git add -- docs/spec-loop/<run-id>/`) and verify with `git status --short` (Phase 5,
-  step 5).
+  (`git add -- docs/spec-loop/<run-id>/`, excluding the marker files) and verify with
+  `git status --short` (Phase 5, step 5).
+- The marker lifecycle is part of the contract: `.active` at Phase 1, `.publish-choice`
+  at the Phase 5.6 answer, `.active` → `.done` at run end, `.active` recreated on
+  resume. While `.active` exists, the plugin's bundled PreToolUse hook
+  (`spec_loop_guard.py`) enforces the push/staging/main-branch/config-edit rules
+  deterministically — markers are never committed and never deleted to dodge a
+  denial (a denial means the run has not earned that operation yet).

@@ -194,11 +194,43 @@ class Validator:
         for pattern in content_globs:
             for doc in sorted(plugin_dir.glob(pattern)):
                 self._check_plugin_root_refs(plugin_dir, doc)
+        for hooks_file in sorted(plugin_dir.glob("hooks/*.json")):
+            self._check_hook_refs(plugin_dir, hooks_file)
         self._check_dockerfile_copies(plugin_dir)
 
-    def _check_plugin_root_refs(self, plugin_dir: Path, doc: Path) -> None:
+    def _check_hook_refs(self, plugin_dir: Path, hooks_file: Path) -> None:
+        """Check ${CLAUDE_PLUGIN_ROOT} refs inside a hooks JSON file.
+
+        Hook command strings JSON-escape their quotes (`\\"`), which breaks the
+        raw-text PLUGIN_ROOT_REF scan (the backslash would be captured as part of
+        the path) — so decode the JSON and scan the decoded string values."""
+        try:
+            data = json.loads(hooks_file.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            self.err(f"{self._rel(hooks_file)}: not valid JSON ({exc})")
+            return
+        self._check_plugin_root_refs(
+            plugin_dir, hooks_file, text="\n".join(self._iter_strings(data))
+        )
+
+    @staticmethod
+    def _iter_strings(node) -> list[str]:
+        """All string values anywhere in a decoded JSON structure."""
+        if isinstance(node, str):
+            return [node]
+        if isinstance(node, dict):
+            return [s for v in node.values() for s in Validator._iter_strings(v)]
+        if isinstance(node, list):
+            return [s for v in node for s in Validator._iter_strings(v)]
+        return []
+
+    def _check_plugin_root_refs(
+        self, plugin_dir: Path, doc: Path, text: str | None = None
+    ) -> None:
         seen: set[str] = set()
-        for relpath in self.PLUGIN_ROOT_REF.findall(doc.read_text()):
+        if text is None:
+            text = doc.read_text()
+        for relpath in self.PLUGIN_ROOT_REF.findall(text):
             relpath = relpath.rstrip(".,;:")  # trailing sentence punctuation
             if not relpath or relpath in seen:
                 continue

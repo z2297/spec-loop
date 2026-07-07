@@ -8,11 +8,13 @@ when it genuinely cannot decide.
 
 ## What it does
 
-- **The Iron Council** (`iron-council`) — a five-member adversarial review body that
+- **The Iron Council** (`iron-council`) — an adversarial review body that
   *challenges* the work before effort is spent on it. It convenes on the **user
-  request** at intake and on **every slice plan** before execution, surfacing
-  discrepancies and opinionated feedback. A majority objection (or any single safety
-  objection) deems the work *unworthy* and is lifted to you to decide.
+  request** at intake (always the full five members) and on **every slice plan**
+  before execution (composition scaled to the slice's risk tier — a low-risk slice
+  convenes just pragmatist + guardian), surfacing discrepancies and opinionated
+  feedback. A majority objection (or any single safety objection) deems the work
+  *unworthy* and is lifted to you to decide.
 - **Auto-decompose** one request into independently shippable slices.
 - **Dynamic decomposition** — the initial cut can be coarse: a slice that turns out
   to be two-or-more shippable changes **splits itself** back into the DAG mid-run
@@ -27,9 +29,31 @@ when it genuinely cannot decide.
 - **Per slice:** `superpowers:writing-plans` → **Iron Council plan review**
   (`iron-council`) → `superpowers:subagent-driven-development`
   (falls back to `executing-plans` if nested subagents aren't available) →
-  `pr-review-toolkit:review-pr` scoped to the plan's risk tier → a bounded auto-fix
-  loop → `superpowers:verification-before-completion` → hand the verified branch back
-  to the controller.
+  `pr-review-toolkit:review-pr` scoped to the plan's risk tier → **adversarial
+  verification of every blocking finding** (a `review-finding-verifier` tries to
+  refute each one against the actual code, so hallucinated findings never burn fix
+  cycles) → a bounded auto-fix loop → `superpowers:verification-before-completion` →
+  hand the verified branch back to the controller.
+- **Deterministic guardrails** — a bundled PreToolUse hook (`spec_loop_guard.py`)
+  mechanically enforces the loop's git invariants while a run is active: no mid-run
+  pushes before your publish choice, no broad staging (`git add -A`), no
+  commits/merges on `main`, no quality-gate config edits. The prompts state the
+  rules; the hook makes them non-negotiable.
+- **Machine-validated contracts** — council members return JSON verdicts and slice
+  workers write JSON status sidecars, validated and aggregated fail-closed by a
+  bundled script (`council_contracts.py`) — a garbled verdict can never be
+  mistaken for an endorsement, a missing member's verdict fails the convening
+  (`aggregate --expect`), and a slice without a valid sidecar is never trusted
+  as done.
+- **Explore once, share everywhere** — the controller's Phase 0 codebase
+  exploration is persisted as `docs/spec-loop/<run-id>/conventions.md` and handed
+  (with the run's `shared_constraints`) to every slice worker and every council
+  convening as one identical context packet, instead of each agent re-discovering
+  the same conventions.
+- **Cross-run learning** — prior runs' committed artifacts are precedent: the
+  historian reads earlier runbooks, decision logs, and human-answered escalations
+  and flags re-litigation, and `escalation-gate` checks them before surfacing — a
+  question you answered in run N is not asked again in run N+1.
 - **Single-branch integration** — every slice merges into **one** dedicated local
   integration branch. Slices never self-merge or open their own PRs; the controller
   merges each verified slice branch **serially** (race-free) and deletes it. The run
@@ -38,7 +62,8 @@ when it genuinely cannot decide.
   request — never by default.
 - **Autonomy contract** (`escalation-gate`): proceed-and-log by default; interrupt
   you only on (1) genuine ambiguity, (2) a material assumption, (3) a review
-  BLOCK that survives the auto-fix loop, or (4) an Iron Council objection.
+  BLOCK that survives the auto-fix loop, (4) an Iron Council objection, or (5) a
+  quality-gate block that survives the refactor loop.
   Escalations are batched at wave boundaries so background work never blocks your
   terminal.
 
@@ -261,9 +286,12 @@ changed code against configurable thresholds:
 Plus any **custom gates** you add (a metric threshold, or a shell command that must
 pass against the changed files).
 
-- **Measurement is hybrid:** a real analyzer is used when one is installed for the
-  project's language (e.g. `eslint` complexity, `radon`, `lizard`); otherwise the
-  language-agnostic `refactor-analysis` heuristics estimate the same metrics.
+- **Measurement is script-first and deterministic:** the bundled
+  `scripts/quality_gate.py` measures the slice diff — via an installed analyzer
+  when available (`lizard` preferred, `radon` for Python) or its built-in stdlib
+  analyzer (marked `builtin-heuristic`) otherwise — and emits one JSON report of
+  record. Model-driven heuristics remain only as a fallback when the script itself
+  cannot run.
 - **On failure, the slice refactors itself** — a bounded (default 3), **behavior-
   preserving** loop that changes implementation only and keeps tests green. If it
   still can't comply, the slice escalates (`NEEDS_DECISION`) rather than merging.
@@ -323,6 +351,7 @@ duplicating it), so Obsidian's graph view becomes a navigable map of your codeba
 | agent   | `iron-council-pragmatist` | Council member — challenges the scope |
 | agent   | `iron-council-guardian`   | Council member — challenges the risk |
 | agent   | `iron-council-historian`  | Council member — challenges consistency with the codebase |
+| agent   | `review-finding-verifier` | Adversarially verifies one blocking review finding against the actual code before the auto-fix loop — refutes with file:line evidence or confirms (confirm is the default) |
 | skill   | `iron-council`    | Convenes the council, aggregates verdicts, routes objections to `escalation-gate` |
 | skill   | `escalation-gate` | The autonomy contract |
 | skill   | `review-depth-map`| Maps a plan's risk tier to how far `review-pr` goes |

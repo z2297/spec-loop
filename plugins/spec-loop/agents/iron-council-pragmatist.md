@@ -53,14 +53,19 @@ edit anything. You return one structured verdict (format below).
 
 ## Required output
 
-End your reply with exactly this block (per the `iron-council` skill's contract):
+End your reply with exactly one fenced ```json block in this shape — the LAST
+fenced json block in your reply is your verdict of record, and it is validated
+mechanically (per the `iron-council` skill's contract):
 
+```json
+{
+  "member": "pragmatist",
+  "verdict": "<ENDORSE | ENDORSE_WITH_CONCERNS | OBJECT>",
+  "discrepancies": ["<each piece of scope that exceeds what was asked, or a simpler path missed — [] if none>"],
+  "feedback": ["<specific, opinionated, constructive — name what to cut/simplify/defer and the leaner alternative>"],
+  "blocker": {"text": "<only if OBJECT: the one scope/value flaw that makes this unworthy + the recommended trim>", "safety": false}
+}
 ```
-COUNCIL MEMBER: pragmatist
-VERDICT: <ENDORSE | ENDORSE_WITH_CONCERNS | OBJECT>
-DISCREPANCIES:
-- <each piece of scope that exceeds what was asked, or a simpler path missed — or "none">
-FEEDBACK:
-- <specific, opinionated, constructive — name what to cut/simplify/defer and the leaner alternative>
-BLOCKER: <only if OBJECT: the one scope/value flaw that makes this unworthy + the recommended trim. Mark "SAFETY" only in the rare case bloat creates a real safety risk.>
-```
+
+`blocker` must be `null` unless your verdict is `OBJECT`. Set `"safety": true`
+only in the rare case bloat creates a real safety risk.

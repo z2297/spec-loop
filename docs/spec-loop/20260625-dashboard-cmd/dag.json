@@ -1,0 +1,22 @@
+{
+  "base_ref": "main",
+  "base_sha": "b24b3d703a803093736056699241a1361208af97",
+  "slices": [
+    {
+      "id": "s1",
+      "goal": "Add a read-only `/spec-loop:dashboard` slash command that renders a terminal-markdown dashboard of a spec-loop run from its durable artifacts under docs/spec-loop/<run-id>/. Create plugins/spec-loop/commands/dashboard.md following the quality-gate.md authoring convention (frontmatter: description, argument-hint '[run-id]', allowed-tools STRICTLY read-only [\"Bash\",\"Glob\",\"Grep\",\"Read\"] — no Write/Edit/Task/AskUserQuestion; a short read-only intro stating it triggers/mutates NO slice work; numbered ## Steps; ## Notes). Behavior the command must specify: (1) Run selection — optional <run-id> arg; with no arg default to the most-recent run by globbing docs/spec-loop/*/dag.json; resolve run-id by ENUMERATING docs/spec-loop/ dirs and matching (never interpolate raw arg into a shell path — traversal guard); print 'no spec-loop runs found' when none. (2) Source of truth — dag.json {base_ref,base_sha,slices:[{id,goal,files,subsystems,deps,risk_tier,depth,parent,status}]} per spec-loop.md:114-118, plus siblings request.md, escalations.md, decisions-log.md, and per-slice slice-<id>-report.md / slice-<id>-split.json. Introduce NO new state/cache file. (3) Waves are DERIVED, not stored — compute exactly as the controller does (a pending slice whose deps are all 'complete'); treat status:'split' parents as terminal; honor split-child id convention <parent-id>.N with depth/parent (spec-loop.md:163-176). (4) Render persisted statuses (pending|complete|split) honestly — do NOT claim live 'running now' from cold artifacts; derive runnable-pending (deps met) vs blocked-pending (deps unmet) vs awaiting-human (slice has an OPEN entry in escalations.md). (5) 'plans' trap — per-slice plans live in worktrees that are DELETED at merge; surface the durable slice-<id>-report.md instead, and only show a live plan when the worktree .worktrees/spec-loop/<run-id>/<slice-id> still exists; never claim to show a plan you cannot read. (6) Output blocks: a header (run-id, base_ref@sha), a DAG/wave listing, a slice table (id, goal, tier, depth, parent, deps, status), a status rollup (counts + current runnable wave), OPEN escalations, and the decisions-log tail. (7) Tolerate a partial/half-written dag.json (no atomic-write discipline in the codebase) — catch parse failures and report 'run in progress — state momentarily unreadable' rather than erroring or inventing state. Plus the release ritual: add a `### Added` line under CHANGELOG.md's [Unreleased]; add a Components-table row in plugins/spec-loop/README.md; bump plugins/spec-loop/.claude-plugin/plugin.json version (1.0.0 -> 1.1.0, minor: additive command). Do NOT touch .claude-plugin/marketplace.json (archive entries are added at release time only). Frontmatter MUST include a `description` key (scripts/validate_marketplace.py:186-190 fails CI without it). Verify with scripts/validate_marketplace.py.",
+      "files": [
+        "plugins/spec-loop/commands/dashboard.md",
+        "CHANGELOG.md",
+        "plugins/spec-loop/README.md",
+        "plugins/spec-loop/.claude-plugin/plugin.json"
+      ],
+      "subsystems": ["spec-loop-plugin-commands", "docs", "release-metadata"],
+      "deps": [],
+      "risk_tier": 1,
+      "depth": 0,
+      "parent": null,
+      "status": "complete"
+    }
+  ]
+}

@@ -983,5 +983,76 @@ class BundledDependencyTest(unittest.TestCase):
         self.assertEqual(srcs, ["a.py", "b.py"])
 
 
+def _hooks_json_referencing(relpath: str) -> str:
+    # Hook commands quote the plugin-root path, so the raw file text contains
+    # JSON-escaped quotes (\") around the ref — the exact case that breaks a
+    # raw-text PLUGIN_ROOT_REF scan and requires decoding the JSON first.
+    return json.dumps(
+        {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": f'python3 "${{CLAUDE_PLUGIN_ROOT}}/{relpath}"',
+                                "timeout": 5,
+                            }
+                        ],
+                    }
+                ]
+            }
+        },
+        indent=2,
+    )
+
+
+class HookRefTest(unittest.TestCase):
+    NEUTRAL_CMD = cmd(description="d", allowed_tools=["Bash"], body="no refs here")
+
+    def test_hook_ref_to_missing_file_fails(self):
+        ok, errors = run_on_command_with_files(
+            self.NEUTRAL_CMD,
+            {"hooks/hooks.json": _hooks_json_referencing("scripts/ghost_guard.py")},
+        )
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("not shipped" in e and "scripts/ghost_guard.py" in e for e in errors),
+            f"a hooks.json ref to an unshipped file must fail; got: {errors}",
+        )
+
+    def test_hook_ref_to_shipped_file_passes_despite_escaped_quotes(self):
+        ok, errors = run_on_command_with_files(
+            self.NEUTRAL_CMD,
+            {
+                "hooks/hooks.json": _hooks_json_referencing("scripts/guard.py"),
+                "scripts/guard.py": "print('hi')\n",
+            },
+        )
+        self.assertTrue(ok, f"a shipped hook ref must pass; got: {errors}")
+
+    def test_hook_ref_traversal_fails(self):
+        ok, errors = run_on_command_with_files(
+            self.NEUTRAL_CMD,
+            {"hooks/hooks.json": _hooks_json_referencing("../../etc/passwd")},
+        )
+        self.assertFalse(ok)
+        self.assertTrue(any("path traversal" in e for e in errors), errors)
+
+    def test_invalid_hooks_json_fails(self):
+        ok, errors = run_on_command_with_files(
+            self.NEUTRAL_CMD, {"hooks/hooks.json": "{not json"}
+        )
+        self.assertFalse(ok)
+        self.assertTrue(any("not valid JSON" in e for e in errors), errors)
+
+    def test_iter_strings_walks_nested_structures(self):
+        strings = vm.Validator._iter_strings(
+            {"a": ["x", {"b": "y", "c": 3}], "d": None, "e": "z"}
+        )
+        self.assertEqual(sorted(strings), ["x", "y", "z"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -48,14 +48,20 @@ edit anything. You return one structured verdict (format below).
 
 ## Required output
 
-End your reply with exactly this block (per the `iron-council` skill's contract):
+End your reply with exactly one fenced ```json block in this shape — the LAST
+fenced json block in your reply is your verdict of record, and it is validated
+mechanically (per the `iron-council` skill's contract):
 
+```json
+{
+  "member": "skeptic",
+  "verdict": "<ENDORSE | ENDORSE_WITH_CONCERNS | OBJECT>",
+  "discrepancies": ["<each gap between what was asked and what is actually well-posed — [] if none>"],
+  "feedback": ["<specific, opinionated, constructive — name the requirement/assumption/criterion>"],
+  "blocker": {"text": "<only if OBJECT: the one premise flaw that makes this unworthy + the precise question or remedy that resolves it>", "safety": false}
+}
 ```
-COUNCIL MEMBER: skeptic
-VERDICT: <ENDORSE | ENDORSE_WITH_CONCERNS | OBJECT>
-DISCREPANCIES:
-- <each gap between what was asked and what is actually well-posed — or "none">
-FEEDBACK:
-- <specific, opinionated, constructive — name the requirement/assumption/criterion>
-BLOCKER: <only if OBJECT: the one premise flaw that makes this unworthy + the precise question or remedy that resolves it. Mark "SAFETY" only if it is irreversible data loss, a security hole, or a broken public contract.>
-```
+
+`blocker` must be `null` unless your verdict is `OBJECT`. Set `"safety": true`
+only if it is irreversible data loss, a security hole, or a broken public
+contract.
