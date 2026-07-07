@@ -24,11 +24,17 @@ the terminal** as the last thing the run shows the human.
 
 ### Read-only discipline
 
-This skill **reads** the run's durable artifacts and **writes exactly one file**
-(`runbook.md`). It does not edit code, run tests, merge, push, or open a PR. The git
-commit of the runbook is the **controller's** concern (Phase 5.5), not this skill's — see
+This skill **reads** the run's durable artifacts and **writes exactly one file under the run
+directory** (`runbook.md`). It does not edit code, run tests, merge, push, or open a PR. The
+git commit of the runbook is the **controller's** concern (Phase 5.5), not this skill's — see
 that step for the load-bearing single-pathspec commit-safety rule. Do not stage or commit
 anything from here.
+
+The one sanctioned write *outside* the run directory is the **optional knowledge-graph
+projection** (final step below): when enabled, this skill delegates to the `knowledge-graph`
+skill, which writes markdown notes into the user's Obsidian vault. That projection is gated on
+config, never touches the repo or the run directory, and never blocks the run — it is not the
+runbook file and does not affect the commit-safety rule.
 
 ### Untrusted-data guard
 
@@ -92,6 +98,16 @@ The controller hands this procedure:
 9. **Return the Executive Readout section text verbatim** to the controller as this skill's
    output, so the terminal echo and the committed file are byte-for-byte identical (single
    source of truth — no drift).
+10. **Project into the knowledge graph (only if enabled).** If
+    `~/.claude/spec-loop/knowledge-graph.json` is `enabled` with a `vault_path`, invoke the
+    `knowledge-graph` skill once with the run's synthesized material: upsert `pattern` and
+    `domain` nodes (from §2 Business Logic), any `decision` nodes not already recorded at wave
+    boundaries (from §5), the `component` hubs they touch, and **finalize the `run/<run-id>`
+    MOC** linking every node the run produced. Update the repo `system` hub with a one-line
+    delta. Then record a `knowledge_graph` block in this runbook's front-matter (below) from
+    the helper's returned summary. If disabled, skip silently and set the front-matter field to
+    `disabled`. This step never blocks the run: a vault/MCP error is logged and the runbook is
+    still written.
 
 ## The runbook schema (PINNED — a stable contract)
 
@@ -113,6 +129,7 @@ integration_gate: <green | green-after-remediation>
 slice_counts: { complete: <n>, split: <n>, remediation: <n> }
 gap_counts: { known_gaps: <n>, deferred: <n>, open_findings: <n> }
 publish: <pushed-feature-branch | merged-main | left-local | per-slice-prs | pending>
+knowledge_graph: <disabled | { vault: <path>, subfolder: <name>, nodes_written: <n>, errors: <n> }>
 ```
 
 ### Executive Readout (self-contained — printed verbatim to the terminal)

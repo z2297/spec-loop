@@ -277,12 +277,38 @@ re-prompted — update it anytime with:
 /spec-loop:quality-gate
 ```
 
+## Knowledge graph (optional)
+
+`/spec-loop` can accumulate what each run *learned* into a persistent **Obsidian knowledge
+graph** — one markdown note per **decision**, **architecture pattern**, **system-context** hub,
+and **domain-knowledge** item, linked with `[[wikilinks]]` and tagged via YAML frontmatter.
+Unlike the per-run artifacts under `docs/spec-loop/<run-id>/`, these notes **accumulate and
+cross-link across every run and repo**: a repo's system hub and shared patterns grow over time
+(re-runs *update* a node — appending a dated observation and the new run-id — rather than
+duplicating it), so Obsidian's graph view becomes a navigable map of your codebase's decisions.
+
+- **Opt-in and portable.** Disabled by default. Enable it — and give **your own** vault path
+  (there is no assumed default; this is a distributed plugin) — with:
+  ```
+  /spec-loop:knowledge-graph
+  ```
+  The config persists globally at `~/.claude/spec-loop/knowledge-graph.json` and is never
+  re-prompted. Notes are written under `<vault>/<subfolder>/` (default subfolder `spec-loop`).
+- **Light touch — does not affect the loop.** Only the controller (at phase boundaries) and the
+  end-of-run `runbook` write notes; **slice workers never touch the vault**, so parallel
+  execution is unchanged. A vault/MCP hiccup is logged and never blocks a run.
+- **Writes are MCP-preferred with a direct-file fallback.** With the Obsidian app + Local REST
+  API MCP reachable, it uses it (live indexing + cross-vault link discovery); otherwise it
+  writes the markdown straight to disk (Obsidian indexes it on next open). Requires an Obsidian
+  vault; the Obsidian app is **not** required for writes.
+
 ## Components
 
 | Type    | Name              | Role |
 |---------|-------------------|------|
 | command | `spec-loop`       | Controller — decompose, schedule waves, ingest splits, run the integration gate, surface batched escalations |
 | command | `quality-gate`    | View/update the global code-quality gate config (`/spec-loop:quality-gate`) |
+| command | `knowledge-graph` | View/update the global Obsidian knowledge-graph config — vault path, node types, write mode (`/spec-loop:knowledge-graph`) |
 | command | `dashboard`       | Read-only terminal-markdown view of a run — **stage-aware** (Iron Council findings, per-slice execution DAG, final-review Executive Readout) with a static all-status escalations section (`/spec-loop:dashboard [run-id]`) |
 | command | `dashboard-serve` | Start a local read-only **web** dashboard — a dark-theme single-page UI whose run detail is a **stage pipeline** (Iron Council → Execution → Final Review) with a specific view per stage and a pinned escalations panel, over the same run artifacts (`/spec-loop:dashboard-serve [--port N] [--root PATH]`) |
 | command | `peer-review`     | Strictly read-only multi-provider peer-review loop — resolve a real PR (GitHub/Azure DevOps/Bitbucket URL or local `--base/--head`), convene the five `peer-review-*` reviewers + a report-only `pr-review-toolkit` pass via `peer-review-council`, and publish one report under `docs/pr-review/<review-id>/`; never edits, merges, or posts (`/spec-loop:peer-review <requirements> --pr <url>`) |
@@ -301,6 +327,7 @@ re-prompted — update it anytime with:
 | skill   | `escalation-gate` | The autonomy contract |
 | skill   | `review-depth-map`| Maps a plan's risk tier to how far `review-pr` goes |
 | skill   | `quality-gate`    | Measures changed code vs thresholds; drives the behavior-preserving refactor loop |
+| skill   | `knowledge-graph` | Projects a run's decisions/patterns/context/domain into the user's Obsidian vault as linked notes that accumulate across runs (opt-in; controller + runbook only; MCP-preferred with direct-file fallback) |
 | skill   | `peer-review-council` | Convenes the five `peer-review-*` reviewers + a report-only `pr-review-toolkit` pass and aggregates them into one pinned-schema, report-only review (no fixes, no write-back) |
 | skill   | `runbook`         | At the end of Phase 5 (gate green, before publishing) synthesizes and commits one `docs/spec-loop/<run-id>/runbook.md` from the run's durable artifacts — a self-contained Executive Readout + What Was Built, Business Logic, Gaps, requirement traceability, decisions summary, integration-gate result, and how-to-verify — and returns the Executive Readout as the run's final terminal output |
 

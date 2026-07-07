@@ -42,6 +42,15 @@ because you are the only layer that can interactively ask the human anything.
   `docs/spec-loop/<run-id>/runbook.md` from the run's durable artifacts (which you then
   commit) and returns the **Executive Readout** that becomes the run's final terminal
   output.
+- **OPTIONAL SUB-SKILL:** `knowledge-graph` projects the run's decisions, architecture
+  patterns, system context, and domain knowledge into the user's Obsidian vault as linked
+  markdown notes that accumulate across runs. It is **opt-in** — active only when
+  `~/.claude/spec-loop/knowledge-graph.json` has `enabled:true` and a `vault_path`; otherwise
+  it no-ops. It is **light touch**: you (the controller) invoke it at phase boundaries
+  (Phase 1 start, each wave boundary) and `runbook` invokes it at end of run — **never** a
+  slice worker, so it does not touch the parallel hot path. Ensure its config exists in Phase 0
+  (batched with the quality-gate first-run setup); if disabled, say nothing and skip every
+  knowledge-graph step below.
 - This loop **intentionally overrides** the human gates in `brainstorming` and
   `subagent-driven-development`. It does NOT override
   `superpowers:verification-before-completion`.
@@ -88,13 +97,20 @@ proceed without them.
    request prose explicitly asks for a branch/PR per slice; otherwise the run is
    **single-branch** — all slices merge into one integration branch. Never infer
    per-slice branches from anything less than an explicit request.
-3. **Quality-gate config (one-time).** Check whether
+3. **Global config (one-time).** Check whether
    `~/.claude/spec-loop/quality-gate.json` exists. If it does **not**, run the
    first-run setup once now — follow the `/spec-loop:quality-gate` command's routine
    to prompt the human (validate the quality level + any custom gates) and write the
-   file. **Batch this with the Phase 0 step 6 `escalation-gate` round** so the human
-   sees a single up-front interaction. If the file already exists, say nothing and
-   proceed — never re-prompt.
+   file. If the file already exists, say nothing and proceed — never re-prompt.
+   - **Knowledge graph (also one-time, optional).** Check whether
+     `~/.claude/spec-loop/knowledge-graph.json` exists. If it does **not**, add a single
+     **opt-in offer** to the same batched round ("record this run's decisions / patterns /
+     context into an Obsidian vault? if so, give the vault path") per the
+     `/spec-loop:knowledge-graph` command's routine, and write the file (default `disabled`
+     with `vault_path:null` if the human declines or gives no path — never assume a path).
+     If it already exists, say nothing.
+   - **Batch both of these with the Phase 0 step 8 `escalation-gate` round** so the human
+     sees a single up-front interaction.
 4. Restate the request in your own words (per the user's global CLAUDE.md).
 5. Explore the codebase to find reusable functions, patterns, and conventions —
    launch up to 3 `Explore` agents in parallel. Prefer reuse over new code.
@@ -159,6 +175,12 @@ proceed without them.
    - `escalations.md` — start empty (header only).
    - `decisions-log.md` — start empty (header only).
 4. Sanity-check the DAG: no cycles, every `deps` id exists. If a cycle exists, that is a decomposition error — fix it yourself (collapse the cyclic slices into one) and log it.
+5. **Seed the knowledge graph (only if enabled).** If `~/.claude/spec-loop/knowledge-graph.json`
+   is `enabled` with a `vault_path`, invoke the `knowledge-graph` skill once to upsert the
+   `system/<repo>` hub (a create-or-touch that adds this `run-id` to a note persisting across
+   runs, with a one-line summary of the system) and create the `run/<run-id>` MOC. If disabled,
+   skip silently. This is a single serial helper call in the main session — it does not gate or
+   delay wave scheduling.
 
 ## Phase 2 — Schedule waves
 
@@ -244,6 +266,14 @@ background dispatch to work below depth 1.
 6. Write the human's answers back into `escalations.md` (set `status: ANSWERED`)
    and re-dispatch each answered slice via a fresh `spec-loop-slice` agent with
    the answer injected into its prompt.
+7. **Record wave decisions in the knowledge graph (only if enabled).** If the
+   knowledge graph is enabled, invoke the `knowledge-graph` skill once for this wave to
+   upsert `decision` nodes for the material decisions / council verdicts appended to
+   `decisions-log.md` during the wave, plus one `decision` node per **human-answered
+   escalation** from step 6 — each linking to the `run`, the repo `system`, and the
+   `component` hubs it touched (the helper creates those hubs on reference). Keep it to the
+   *material* decisions, not every logged line. This is one serial helper call in the main
+   session at the wave boundary; if disabled, skip silently.
 
 ## Phase 4 — Loop
 

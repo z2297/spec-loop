@@ -22,6 +22,25 @@ version with dashes instead of dots, since plugin names are kebab-case
 prior build. Pinned entries map to git tags `v<version>`.
 
 ## [Unreleased]
+### Added
+- **Obsidian knowledge graph (opt-in).** `/spec-loop` can now project a run's decisions,
+  architecture patterns, system context, and domain knowledge into an Obsidian vault as
+  linked markdown notes (`[[wikilinks]]` + YAML frontmatter) that **accumulate and cross-link
+  across every run and repo** — a persistent graph instead of per-run logs.
+  - New global, opt-in config at `~/.claude/spec-loop/knowledge-graph.json`, configured by the
+    new **`/spec-loop:knowledge-graph`** command (mirrors `/spec-loop:quality-gate`). The
+    vault path is **user-supplied with no machine-specific default** — the feature stays inert
+    until you provide one, keeping the distributed plugin portable.
+  - New **`knowledge-graph`** skill pins the node taxonomy, frontmatter schema, and wikilink
+    edges; writes are **MCP-preferred with a direct-file fallback** (works with Obsidian
+    closed).
+  - New stdlib-only helper `scripts/knowledge_graph.py` (+ `test_knowledge_graph.py`) owns the
+    deterministic **idempotent upsert** (frontmatter union, dated observation blocks, wikilink
+    dedup, run MOC, path-containment) so nodes are *updated*, never duplicated, on re-runs.
+  - **Light touch by design:** only the controller (at phase boundaries) and the end-of-run
+    `runbook` write notes — **slice workers never touch the vault**, so the loop's parallel
+    execution is unaffected. The runbook records a `knowledge_graph` block in its front-matter
+    for traceability.
 
 ## [1.2.1] - 2026-07-06
 ### Added
