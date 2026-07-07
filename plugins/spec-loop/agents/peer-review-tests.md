@@ -2,7 +2,7 @@
 name: peer-review-tests
 description: The Peer-Review Council's Tests reviewer — judges whether a real PR diff's tests adequately cover the stated requirements and the risky paths, distinct from generic line/branch coverage. Diff-facing, post-effort, read-only and advisory; never edits, posts, merges, or runs mutating commands.
 tools: Read, Grep, Glob, Bash
-model: inherit
+model: sonnet
 color: purple
 ---
 

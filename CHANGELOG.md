@@ -25,6 +25,35 @@ prior build. Pinned entries map to git tags `v<version>`.
 
 ## [1.2.0] - 2026-06-29
 ### Added
+- **Stage-aware dashboard.** The run-detail view (both the `/spec-loop:dashboard` terminal
+  view and the `/spec-loop:dashboard-serve` web SPA) now presents a run as a **pipeline of
+  stages** — Iron Council → Execution → Final Review — with a specific view per stage and a
+  persistent **Escalations** panel:
+  - **Iron Council** — the council findings parsed from `decisions-log.md` (intake + per-slice
+    verdicts: ENDORSE / ENDORSE_WITH_CONCERNS / OBJECT, with scope + summary).
+  - **Execution** — the existing per-slice DAG view (waves, slice table now with a per-slice
+    report marker, status rollup, recent decisions).
+  - **Final Review** — an executive dashboard synthesized from the committed `runbook.md`
+    (front-matter chips + the self-contained Executive Readout).
+  - **Escalations** — a static, always-shown panel listing **every** escalation (open +
+    answered) with its OPEN/ANSWERED status.
+  The web SPA marks the run's current derived stage in a clickable pipeline strip and switches
+  stage views without a refetch (`#run/<id>/<stage>` routing). Stages, council findings, and
+  the runbook are **derived from cold artifacts** — the dashboard stays strictly read-only and
+  never claims a slice/council is "running right now." New read-only `/api/runs[/…]` fields:
+  `stage`, `council`, `escalations` (all, with status), `runbook`, and `artifacts`.
+- `runbook` skill — at the end of a `/spec-loop` run, after the Phase 5 integration gate is
+  green and just before the publish prompt, the controller synthesizes one committed
+  `docs/spec-loop/<run-id>/runbook.md` from the run's durable artifacts (`dag.json`,
+  `decisions-log.md`, `escalations.md`, `slice-*-report.md`): a self-contained **Executive
+  Readout** plus What Was Built, Business Logic, Gaps/Deferred, requirement traceability, a
+  decisions summary, the integration-gate result, and how-to-verify/operate. The runbook and
+  its full run-state audit trail are committed onto the integration branch (staged by an
+  explicit single-directory pathspec — never `git add -A` — because the run artifacts are
+  untracked-not-ignored) **before** the publish prompt, so they travel with any push/merge;
+  the Executive Readout is then printed verbatim as the run's final terminal output, replacing
+  the previous ephemeral hand-written summary. The web dashboard's per-run scan now reports a
+  read-only `has_runbook` flag.
 - `/spec-loop:dashboard` — a read-only slash command that renders a terminal-markdown
   dashboard of a spec-loop run (DAG, derived waves, per-slice status, open escalations,
   recent decisions) from the durable artifacts under `docs/spec-loop/<run-id>/`. Mutates
@@ -35,10 +64,11 @@ prior build. Pinned entries map to git tags `v<version>`.
   open escalations, recent decisions), with near-real-time auto-refresh (~2.5s polling +
   ETag/304) and a freshness indicator. Strictly read-only (`GET`/`HEAD` only, `127.0.0.1`
   bind, no mutation endpoints). Launch it with the new `/spec-loop:dashboard-serve`
-  command, which starts `scripts/dashboard_server.py` and prints the local URL.
+  command, which starts the plugin-bundled `dashboard_launcher.py` (Docker-preferred,
+  Python-fallback) and prints the local URL.
 - `/spec-loop:peer-review` — a strictly **read-only** multi-provider peer-review loop. It
   resolves a real pull request (GitHub / Azure DevOps / Bitbucket URL, or an explicit local
-  `--base/--head` ref-range) and materializes its diff read-only via `scripts/pr_resolver.py`,
+  `--base/--head` ref-range) and materializes its diff read-only via the plugin-bundled `pr_resolver.py`,
   then convenes five `peer-review-*` reviewers (`peer-review-conformance`, `-correctness`,
   `-design`, `-risk`, `-tests`) plus a report-only `pr-review-toolkit:review-pr` pass through
   the new `peer-review-council` skill, and publishes **one** pinned-schema report at
@@ -48,6 +78,46 @@ prior build. Pinned entries map to git tags `v<version>`.
   now machine-enforced: `scripts/validate_marketplace.py` asserts that any command marked
   read-only (including this one and the two dashboard commands) does not grant `Edit` in its
   `allowed-tools`.
+- **The dashboard and peer-review runtime now ships inside the plugin**, so
+  `/spec-loop:dashboard-serve` and `/spec-loop:peer-review` work on a marketplace install
+  (previously they invoked repo-root `scripts/…` by a relative path that did not exist for
+  installed users). The bundled `dashboard_launcher.py`, `dashboard_server.py`,
+  `pr_resolver.py`, `dashboard_assets/`, and `Dockerfile` live under
+  `plugins/spec-loop/scripts/` (and `plugins/spec-loop/Dockerfile`); the commands invoke
+  them by their absolute `${CLAUDE_PLUGIN_ROOT}` path, so they run from any working
+  directory. `scripts/validate_marketplace.py` now guards against regressions: it fails if a
+  command/skill/agent references a `${CLAUDE_PLUGIN_ROOT}/<path>` that is not shipped, or if
+  the plugin `Dockerfile` `COPY`s a source missing from the build context.
+
+### Changed
+- **Single-branch integration is now the default and is hardened.** Every slice merges into
+  ONE dedicated local integration branch (cut from `main` by default, named meaningfully after
+  the work — never containing `spec-loop`), instead of each slice being free to open its own PR
+  or leave its own branch. Slices no longer self-merge: they finish as verified, committed
+  branches and the **controller** merges each into the integration branch **serially** at the
+  wave boundary (eliminating the race where two same-wave slices checked out and merged into the
+  shared branch concurrently), then deletes the per-slice worktree branch. Per-slice worktree
+  branches are now explicitly an ephemeral isolation detail, not a deliverable.
+- **The run ends by prompting how to publish** the integration branch — push it as a feature
+  branch (optionally opening a PR) or merge it onto `main` — and never pushes or touches `main`
+  without that explicit choice.
+- Added flags `--branch <name>` (integration branch name), `--base-branch <name>` (branch it is
+  cut from; default `main`/`master`), and `--per-slice-pr` (opt into a branch/PR per slice — the
+  only way, alongside an explicit request in the prose, to get the old per-slice behavior).
+- `dag.json` now records `base_branch` and `merge_mode`, and `--resume` restores and checks out
+  the integration branch.
+- **Per-role model selection for the advisory reviewers (token optimization).** The ten
+  read-only council agents used to run on `model: inherit`, so an Opus session spent Opus on
+  every one — including bursts of five at intake, per slice plan, and per peer-review. The seven
+  judgment/scope reviewers now default to `model: sonnet` (`iron-council-skeptic`, `-architect`,
+  `-pragmatist`, `-historian`; `peer-review-conformance`, `-design`, `-tests`), while the three
+  roles that can block on their own stay on `inherit` at full session strength
+  (`iron-council-guardian` and `peer-review-risk` — a lone `SAFETY` objection halts the loop — and
+  `peer-review-correctness` — bug/logic finding, mirroring pr-review-toolkit pinning
+  `code-reviewer` to opus). The `spec-loop-slice` implementer stays `inherit` so it keeps cascading
+  the session model to superpowers implementers. This changes only spec-loop's own agent
+  frontmatter — it injects no `model:` into any `superpowers` or `pr-review-toolkit` dispatch, so
+  their own model choices (e.g. `code-reviewer`/`code-simplifier` pinned to opus) remain honored.
 
 ## [1.0.0] - 2026-06-25
 ### Added

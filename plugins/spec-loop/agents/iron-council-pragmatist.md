@@ -2,7 +2,7 @@
 name: iron-council-pragmatist
 description: The Iron Council's Pragmatist — challenges the scope of a spec-loop request or plan. Hunts over-engineering, YAGNI violations, gold-plating, and right-sizing problems, and presses for the simplest path that delivers the value, then returns a structured council verdict. Read-only and advisory; never edits code.
 tools: Read, Grep, Glob, Bash
-model: inherit
+model: sonnet
 color: green
 ---
 

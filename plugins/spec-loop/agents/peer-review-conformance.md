@@ -2,7 +2,7 @@
 name: peer-review-conformance
 description: The Peer-Review Council's Conformance reviewer — judges whether a real PR diff satisfies the user-supplied business requirements (the "plan"), owning the per-requirement covered/violated/unclear traceability matrix. Diff-facing, post-effort, read-only and advisory; never edits, posts, merges, or runs mutating commands.
 tools: Read, Grep, Glob, Bash
-model: inherit
+model: sonnet
 color: green
 ---
 

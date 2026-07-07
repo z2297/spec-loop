@@ -1,0 +1,22 @@
+# Lean build context for the dashboard image.
+#
+# The build context is the PLUGIN ROOT (the launcher pins it via
+# Path(__file__).resolve().parent.parent — i.e. this dir), so it also contains
+# commands/, agents/, skills/, README.md, plugin.json, and the rest of scripts/.
+#
+# Strategy: deny everything, then re-include ONLY the two runtime paths the image
+# needs. This guarantees the plugin's commands/agents/skills, docs, tests, the
+# other scripts (dashboard_launcher.py, pr_resolver.py), and __pycache__ never
+# enter the build context — nothing but the server + its baked UI assets is
+# available to COPY.
+*
+
+# Re-include only the runtime files (NOT a blanket !scripts/, which would readmit
+# tests and unrelated tooling). Docker needs the directory entries re-included so
+# the traversal reaches the files below.
+!scripts
+scripts/*
+!scripts/dashboard_server.py
+!scripts/dashboard_assets
+scripts/dashboard_assets/*
+!scripts/dashboard_assets/**

@@ -173,6 +173,78 @@ class Validator:
             )
 
         self.validate_frontmatter_files(plugin_dir)
+        self.validate_bundled_dependencies(plugin_dir)
+
+    # Matches a plugin-relative path referenced via the ${CLAUDE_PLUGIN_ROOT}
+    # env var in command/skill/agent content, capturing the path after the slash
+    # up to the first quote, whitespace, backtick, or paren.
+    PLUGIN_ROOT_REF = re.compile(r"\$\{CLAUDE_PLUGIN_ROOT\}/([^\s\"'`)]+)")
+
+    def validate_bundled_dependencies(self, plugin_dir: Path) -> None:
+        """Guard against a command/skill/agent (or the Dockerfile) referencing a
+        bundled file that does not actually ship inside the plugin.
+
+        This is the packaging counterpart to the frontmatter gate: a marketplace
+        install copies ONLY the plugin dir, so any `${CLAUDE_PLUGIN_ROOT}/<path>`
+        the content invokes — and any `COPY <src>` the plugin's Dockerfile builds
+        — must resolve to a file/dir under the plugin dir, or the shipped plugin is
+        broken for end users (the exact class of bug that let the dashboard/resolver
+        scripts go unshipped)."""
+        content_globs = ("commands/*.md", "skills/*/SKILL.md", "agents/*.md")
+        for pattern in content_globs:
+            for doc in sorted(plugin_dir.glob(pattern)):
+                self._check_plugin_root_refs(plugin_dir, doc)
+        self._check_dockerfile_copies(plugin_dir)
+
+    def _check_plugin_root_refs(self, plugin_dir: Path, doc: Path) -> None:
+        seen: set[str] = set()
+        for relpath in self.PLUGIN_ROOT_REF.findall(doc.read_text()):
+            relpath = relpath.rstrip(".,;:")  # trailing sentence punctuation
+            if not relpath or relpath in seen:
+                continue
+            seen.add(relpath)
+            if ".." in Path(relpath).parts:
+                self.err(f"{self._rel(doc)}: ${{CLAUDE_PLUGIN_ROOT}} reference "
+                         f"contains '..' (path traversal): {relpath}")
+                continue
+            if not (plugin_dir / relpath).exists():
+                self.err(
+                    f"{self._rel(doc)}: references bundled path "
+                    f"'${{CLAUDE_PLUGIN_ROOT}}/{relpath}' that is not shipped in the "
+                    f"plugin (expected {self._rel(plugin_dir / relpath)})"
+                )
+
+    def _check_dockerfile_copies(self, plugin_dir: Path) -> None:
+        dockerfile = plugin_dir / "Dockerfile"
+        if not dockerfile.is_file():
+            return
+        for src in self._dockerfile_copy_sources(dockerfile.read_text()):
+            if not (plugin_dir / src).exists():
+                self.err(
+                    f"{self._rel(dockerfile)}: COPY source '{src}' does not exist "
+                    f"under the plugin (build context is the plugin root; "
+                    f"expected {self._rel(plugin_dir / src)})"
+                )
+
+    @staticmethod
+    def _dockerfile_copy_sources(text: str) -> list[str]:
+        """Extract build-context COPY sources from a Dockerfile (shell form).
+
+        Skips `COPY --from=<stage>` (those read another build stage, not the
+        context) and remote `ADD` URLs. For `COPY src... dest` the final token is
+        the destination; every earlier non-flag token is a context source."""
+        sources: list[str] = []
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line.upper().startswith("COPY "):
+                continue
+            tokens = line.split()[1:]  # drop the COPY keyword
+            if any(t.startswith("--from=") for t in tokens):
+                continue
+            tokens = [t for t in tokens if not t.startswith("--")]
+            if len(tokens) >= 2:  # need at least one src + a dest
+                sources.extend(tokens[:-1])
+        return sources
 
     def validate_frontmatter_files(self, plugin_dir: Path) -> None:
         # skills/<name>/SKILL.md -> name + description; name must match dir
@@ -291,8 +363,9 @@ class Validator:
                 self.err(f"{self._rel(path)}: frontmatter missing required '{key}'")
 
 
-def main() -> int:
-    root = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    root = Path(argv[0] if argv else ".").resolve()
     if not root.is_dir():
         print(f"error: not a directory: {root}", file=sys.stderr)
         return 1

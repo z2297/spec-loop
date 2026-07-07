@@ -47,6 +47,9 @@ capability here, and that is the security boundary: keep it intact.
      `deps`, `depth`, `parent`, and therefore for waves.
    - `request.md` — the original request (show a short excerpt for context).
    - `escalations.md` and `decisions-log.md` — siblings of `dag.json`.
+   - `runbook.md` (optional; present only after a run reaches Phase 5) — the committed
+     executive readout. Its `---` front-matter carries `integration_gate`, `slice_counts`,
+     `gap_counts`, `publish`, …; its `## Executive Readout` section is self-contained.
    - Per slice, optionally `slice-<id>-report.md` (durable) and `slice-<id>-split.json`.
    - A `slice-<id>-split.json` is **advisory only** — a not-yet-ingested split *proposal*
      holding `{goal, files, subsystems, internal_deps}` (with 1-based sibling indices); it
@@ -98,19 +101,47 @@ capability here, and that is the security boundary: keep it intact.
    a slice — render such an intake-scoped OPEN escalation in the escalations block even though
    it joins to no slice row.
 
-7. **Render the dashboard (terminal markdown).** Print, in order:
-   - **Header** — run-id and `base_ref@base_sha` (from `dag.json`), plus a one-line excerpt
-     of `request.md`.
-   - **DAG / wave listing** — `Wave 0`, `Wave 1`, … each listing its slices with the derived
-     readiness label from Step 4.
+7. **Derive the run's STAGE (cold-artifact only — never a live "running" claim).** A run
+   moves through stages; derive the furthest-progressed one exactly as the server does
+   (`scripts/dashboard_server.py::_derive_stage`), highest wins:
+   - **final-review** — every slice is terminal (`complete`/`split`).
+   - **execution** — work has started (any slice `complete`/`split`, or any
+     `slice-<id>-report.md` exists) but not all slices are terminal.
+   - **iron-council** — `dag.json` has slices but no slice work has started yet.
+   - **preflight** — no slices decomposed yet (a run isn't even listed until `dag.json`
+     exists, so this is essentially never seen here — hence "preflight has no view").
+   Marking the current stage is an **honest artifact signal**, not a claim that the council
+   or a slice is executing at this instant.
+
+8. **Parse Iron Council findings and the runbook (for the stage sections).**
+   - **Council findings** — scan `decisions-log.md` for lines of the form
+     `[<scope>] COUNCIL…` or `[<scope>] IRON COUNCIL…` (tolerating a leading `-`/`#`); each
+     yields `scope` (the bracket token — a slice id or `intake`) and the verdict named in the
+     line (`ENDORSE` / `ENDORSE_WITH_CONCERNS` / `OBJECT`). The intake council vets the
+     request; per-slice councils vet each plan.
+   - **Runbook** — if `runbook.md` exists, take its front-matter fields and the
+     `## Executive Readout` section text verbatim (up to the next `## ` heading).
+
+9. **Render the dashboard (terminal markdown).** Print, in order:
+   - **Header** — run-id, `base_ref@base_sha` (from `dag.json`), the derived **Stage**
+     (Step 7), and a one-line excerpt of `request.md`.
+   - **Iron Council findings** — the Step 8 council entries (`[scope] VERDICT — summary`);
+     "no council verdicts recorded" if none.
+   - **Execution — DAG / wave listing** — `Wave 0`, `Wave 1`, … each listing its slices with
+     the derived readiness label from Step 4.
    - **Slice table** — columns: id, goal (truncated), tier, depth, parent, deps, status
-     (derived label).
+     (derived label), report (✓ when `slice-<id>-report.md` exists).
    - **Status rollup** — counts by derived status, and an explicit list of which slices are
      **runnable now** (runnable-pending) and which are awaiting-human.
-   - **Open escalations** — the OPEN entries from Step 6 (both forms; include intake-scoped).
+   - **Final review — Executive Readout** — when `runbook.md` exists, the front-matter chips
+     (`integration_gate`, `slice_counts`, `gap_counts`, `publish`) and the Executive Readout
+     text; otherwise "run not finished — no runbook yet".
+   - **Escalations (static — all, with status)** — **every** escalation entry (both marker
+     forms; include intake-scoped), each with its OPEN/ANSWERED status — not just the open
+     ones. This section is always shown.
    - **Recent decisions** — the tail of `decisions-log.md` (last several entries).
 
-8. **Robustness (never invent or crash).** There is no atomic-write discipline for
+10. **Robustness (never invent or crash).** There is no atomic-write discipline for
    `dag.json` (the controller rewrites it in place each wave boundary), so a read can catch a
    half-written file. If `dag.json` fails to parse as JSON, print
    `run in progress — state momentarily unreadable` for that run and stop, rather than
@@ -125,9 +156,11 @@ capability here, and that is the security boundary: keep it intact.
   **future follow-on**, intentionally out of scope here.
 - **Cold artifacts.** On-disk statuses are `pending | complete | split` only — there is no
   live "running" state. Every readiness label (runnable-pending, blocked-pending,
-  awaiting-human, redispatch-pending) is **derived** here, not stored. Waves are derived too
-  (the controller never persists them); `dag.json` is the single source of run truth and this
-  command introduces no second one.
+  awaiting-human, redispatch-pending), the run **stage** (preflight / iron-council /
+  execution / final-review), the parsed council findings, and the waves are all **derived**
+  here from cold artifacts, not stored. `dag.json` is the single source of run truth and this
+  command introduces no second one; the stage badge is an honest artifact signal, never a
+  live "council/slice is running now" claim.
 - **Read-only contract.** `allowed-tools` is restricted to `Bash`/`Glob`/`Grep`/`Read` — no
   `Write`/`Edit`/`Task`/`AskUserQuestion`. The project CI gate
   (`scripts/validate_marketplace.py`) only checks that `description` is present, so this

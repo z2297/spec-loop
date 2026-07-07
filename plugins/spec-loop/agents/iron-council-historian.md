@@ -2,7 +2,7 @@
 name: iron-council-historian
 description: The Iron Council's Historian — challenges a spec-loop request or plan for consistency with the existing codebase. Checks established patterns, conventions, prior decisions, and reuse-over-new, then returns a structured council verdict. Read-only and advisory; never edits code.
 tools: Read, Grep, Glob, Bash
-model: inherit
+model: sonnet
 color: purple
 ---
 

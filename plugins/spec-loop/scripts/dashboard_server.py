@@ -36,6 +36,7 @@ import hashlib
 import json
 import os
 import sys
+import urllib.parse
 from collections import namedtuple
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -44,6 +45,14 @@ from pathlib import Path
 # pass one argument instead of four (etag defaults to None).
 Response = namedtuple("Response", "status body content_type etag")
 Response.__new__.__defaults__ = (None,)
+
+# Network settings value object: groups the two decoupled network knobs so
+# build_server takes one argument instead of two (mirrors Response). ``bind_host``
+# is the socket bind address ONLY (0.0.0.0 is intended for inside a container);
+# ``advertise_port`` is the published port a browser targets and is the SOLE
+# driver of the Host-header allowlist. Binding 0.0.0.0 never widens the allowlist.
+NetworkConfig = namedtuple("NetworkConfig", "bind_host advertise_port")
+NetworkConfig.__new__.__defaults__ = ("127.0.0.1", None)
 
 
 def _text(status, message):
@@ -54,6 +63,8 @@ MAX_RUNS = 500              # cap runs scanned per request
 MAX_FILE_BYTES = 1_000_000  # cap any single artifact read into memory
 DECISIONS_TAIL_LINES = 12   # cap decisions-log tail length
 REQUEST_EXCERPT_CHARS = 240 # cap the one-line request excerpt
+COUNCIL_MAX = 50            # cap parsed Iron Council verdict lines per run
+COUNCIL_SUMMARY_CHARS = 240 # cap each council summary line
 
 DEFAULT_PORT = 8787
 DATA_SUBPATH = ("docs", "spec-loop")
@@ -116,6 +127,40 @@ def scan_runs(docs_root):
     return runs
 
 
+def scan_all_roots(roots):
+    """Aggregate ``scan_runs`` across one or more roots.
+
+    ``roots`` is either a bare list of repo-root paths, or an ordered list of
+    ``(root_key, data_root)`` pairs (as produced by ``_resolve_roots``). With a
+    single root the result is transparent — bare ``run_id``, no ``root`` field —
+    for byte-for-byte back-compat. With multiple roots each run's ``run_id`` is
+    namespaced ``<root_key>:<run_id>`` and carries its ``root`` key, so
+    identically-named runs across repos never collide. Pure: never writes."""
+    resolved = _as_root_pairs(roots)
+    aggregated = []
+    for root_key, data_root in resolved:
+        for run in scan_runs(data_root):
+            aggregated.append(_namespace_run(run, root_key))
+    return aggregated[:MAX_RUNS]
+
+
+def _as_root_pairs(roots):
+    """Accept either ``[(key, data_root), ...]`` or a bare list of repo roots and
+    return the ``(root_key, data_root)`` form."""
+    items = list(roots)
+    if items and isinstance(items[0], tuple):
+        return items
+    return _resolve_roots(items)
+
+
+def _namespace_run(run, root_key):
+    """Prefix a run's id with its root key (when namespaced) and attach the
+    ``root`` field. An empty key means single-root/transparent -> unchanged."""
+    if not root_key:
+        return run
+    return {**run, "run_id": f"{root_key}:{run['run_id']}", "root": root_key}
+
+
 def _scan_one_run(run_dir):
     run_id = run_dir.name
     try:
@@ -134,16 +179,23 @@ def _scan_one_run(run_dir):
         "answered_ids": _parse_answered_slice_ids(run_dir),
     }
     enriched = [_label_slice(s, ctx, run_dir) for s in slices]
+    runbook = _parse_runbook(run_dir)
     return {
         "run_id": run_id,
         "base_ref": dag.get("base_ref"),
         "base_sha": dag.get("base_sha"),
+        "stage": _derive_stage(slices, run_dir),
         "slices": enriched,
         "waves": _derive_waves(slices),
         "open_escalations": open_escs,
+        "escalations": _parse_all_escalations(run_dir),
+        "council": _parse_council(run_dir),
         "request_excerpt": _request_excerpt(run_dir),
         "decisions_tail": _decisions_tail(run_dir),
         "counts": _count_labels(enriched),
+        "artifacts": _list_artifacts(run_dir),
+        "runbook": runbook,
+        "has_runbook": runbook is not None,
     }
 
 
@@ -320,10 +372,151 @@ def _decisions_tail(run_dir):
     return lines[-DECISIONS_TAIL_LINES:]
 
 
+# --- stage derivation (cold-artifact only — never a live "running" claim) ---
+
+def _derive_stage(slices, run_dir):
+    """The run's furthest-progressed stage, derived from cold artifacts:
+    ``preflight`` (no slices decomposed yet) < ``iron-council`` (decomposed but
+    no slice work has started) < ``execution`` (some work done, not all terminal)
+    < ``final-review`` (every slice terminal — complete/split). Read-only; this is
+    an honest artifact signal, not a claim that anything is running right now."""
+    if not slices:
+        return "preflight"
+    if all(s.get("status") in ("complete", "split") for s in slices):
+        return "final-review"
+    started = any(s.get("status") in ("complete", "split") for s in slices) or \
+        any((run_dir / f"slice-{s.get('id')}-report.md").is_file() for s in slices)
+    return "execution" if started else "iron-council"
+
+
+# --- Iron Council findings (from decisions-log.md) --------------------------
+
+def _bracket_prefix(line):
+    """Split a ``[token] rest`` line (tolerating leading #/-/* whitespace) into
+    ``(token, rest)``, or ``(None, "")`` when it has no leading bracket token."""
+    s = line.lstrip("#-* \t")
+    if not s.startswith("["):
+        return None, ""
+    close = s.find("]")
+    if close == -1:
+        return None, ""
+    return s[1:close].strip(), s[close + 1:].strip()
+
+
+def _first_verdict(upper):
+    """The strongest council verdict named in an upper-cased line, or ''.
+    ENDORSE_WITH_CONCERNS is checked before ENDORSE (it contains 'ENDORSE')."""
+    for v in ("ENDORSE_WITH_CONCERNS", "OBJECT", "ENDORSE"):
+        if v in upper:
+            return v
+    return ""
+
+
+def _parse_council(run_dir):
+    """Iron Council verdicts from decisions-log.md. Each ``[<scope>] COUNCIL…`` or
+    ``[<scope>] IRON COUNCIL…`` line yields ``{scope, verdict, summary}`` where
+    ``scope`` is the bracket token (a slice id or ``intake``) and ``verdict`` is the
+    verdict named in the line. Pure; bounded to COUNCIL_MAX entries."""
+    text = _read_text_capped(run_dir / "decisions-log.md")
+    out = []
+    for line in text.splitlines():
+        token, rest = _bracket_prefix(line)
+        if token is None:
+            continue
+        upper = rest.upper()
+        if not (upper.startswith("COUNCIL") or upper.startswith("IRON COUNCIL")):
+            continue
+        out.append({
+            "scope": token,
+            "verdict": _first_verdict(upper),
+            "summary": rest[:COUNCIL_SUMMARY_CHARS],
+        })
+        if len(out) >= COUNCIL_MAX:
+            break
+    return out
+
+
+# --- all escalations with status (the static Escalations panel) -------------
+
+def _parse_all_escalations(run_dir):
+    """Every escalation entry (both marker forms) as ``[{token, title, status}]``,
+    where status is 'OPEN', 'ANSWERED', or 'unknown'. Mirrors the OPEN-only
+    ``_parse_open_escalations`` but keeps ANSWERED entries too, for the persistent
+    Escalations panel."""
+    return [
+        {"token": tok, "title": title, "status": state or "unknown"}
+        for tok, title, state in _iter_escalation_headers(run_dir)
+    ]
+
+
+# --- runbook (the final-review executive dashboard source) ------------------
+
+def _parse_front_matter(text):
+    """Top-level ``key: value`` pairs between the leading ``---`` fences of a
+    Markdown file. Nested inline ``{...}`` values are kept as raw strings. Returns
+    {} when there is no leading front-matter block."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    fm = {}
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        key, sep, val = line.partition(":")
+        if sep and key.strip() and not key.startswith((" ", "\t")):
+            fm[key.strip()] = val.strip()
+    return fm
+
+
+def _section_text(text, heading):
+    """The body of a Markdown section: lines after ``heading`` up to the next
+    ``## `` heading (exclusive), stripped."""
+    out, capturing = [], False
+    for line in text.splitlines():
+        if line.strip() == heading:
+            capturing = True
+            continue
+        if capturing and line.startswith("## "):
+            break
+        if capturing:
+            out.append(line)
+    return "\n".join(out).strip()
+
+
+def _parse_runbook(run_dir):
+    """Parse runbook.md into ``{front_matter, executive_readout}``, or ``None`` when
+    absent. Feeds the final-review executive dashboard."""
+    path = run_dir / "runbook.md"
+    if not path.is_file():
+        return None
+    text = _read_text_capped(path)
+    return {
+        "front_matter": _parse_front_matter(text),
+        "executive_readout": _section_text(text, "## Executive Readout"),
+    }
+
+
+# --- artifact inventory (files created along the way) -----------------------
+
+def _list_artifacts(run_dir):
+    """Sorted names of the known run artifacts present in ``run_dir`` — the fixed
+    run-state files plus any ``slice-*-report.md`` / ``slice-*-split.json``."""
+    names = set()
+    for name in ("dag.json", "request.md", "decisions-log.md",
+                 "escalations.md", "runbook.md"):
+        if (run_dir / name).is_file():
+            names.add(name)
+    for pattern in ("slice-*-report.md", "slice-*-split.json"):
+        for path in glob.glob(str(run_dir / pattern)):
+            names.add(Path(path).name)
+    return sorted(names)
+
+
 def _run_etag(run_dir):
     """Per-run ETag from the mtimes of dag.json + sibling artifacts."""
     parts = []
-    for name in ("dag.json", "request.md", "escalations.md", "decisions-log.md"):
+    for name in ("dag.json", "request.md", "escalations.md",
+                 "decisions-log.md", "runbook.md"):
         try:
             parts.append(f"{name}:{os.path.getmtime(run_dir / name):.6f}")
         except OSError:
@@ -342,7 +535,7 @@ def _etag(material):
 class DashboardHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     # Injected by build_server:
-    data_root = ""     # realpath of <root>/docs/spec-loop
+    roots = ()         # ordered ((root_key, data_root), ...); key "" == single-root
     assets_root = ""   # realpath of the bundled assets dir
     allowed_hosts = set()
 
@@ -382,34 +575,66 @@ class DashboardHandler(BaseHTTPRequestHandler):
     # --- endpoints (each returns a Response) ---
 
     def _serve_api_runs(self):
-        runs = scan_runs(self.data_root)
+        runs = scan_all_roots(self.roots)
         etag = _etag("|".join(self._collection_material(runs)))
         return (self._not_modified(etag)
                 or _json_response({"runs": runs}, etag))
 
     def _collection_material(self, runs):
-        data_root = Path(self.data_root)
-        return [f"{r['run_id']}:{_run_etag(data_root / r['run_id'])}"
-                for r in runs]
+        """ETag material keyed on each run's namespaced id + its dir mtimes,
+        resolved within the run's OWNING root only."""
+        material = []
+        for run in runs:
+            _root_key, run_dir = self._resolve_run_dir(run["run_id"])
+            # "-" only if a run listed at scan time fails re-resolution (e.g. a
+            # concurrent delete between the two globs) — an intentional weaker
+            # cache key, never a wrong body. Correctness never depends on it.
+            etag = _run_etag(Path(run_dir)) if run_dir else "-"
+            material.append(f"{run['run_id']}:{etag}")
+        return material
 
     def _serve_api_run_detail(self, raw_id):
-        run_dir = self._resolve_run_dir(raw_id.rstrip("/"))
+        # The client URL-encodes the namespaced id (the ':' separator arrives as
+        # %3A); decode before parsing. Containment (resolve_within) remains the
+        # safety net for any traversal a decode might reveal.
+        namespaced = urllib.parse.unquote(raw_id).rstrip("/")
+        root_key, run_dir = self._resolve_run_dir(namespaced)
         if run_dir is None:
             return _text(404, b"not found")
+        run = _namespace_run(_scan_one_run(Path(run_dir)), root_key)
         etag = _run_etag(Path(run_dir))
-        return (self._not_modified(etag)
-                or _json_response(_scan_one_run(Path(run_dir)), etag))
+        return self._not_modified(etag) or _json_response(run, etag)
 
-    def _resolve_run_dir(self, run_id):
-        """Path-traversal-safe: enumerate discovered run dirs, exact-match the
-        basename, then realpath-confine. Returns the dir or None (one uniform
-        miss for "no such run" and "escapes root" — no path-existence oracle)."""
+    def _resolve_run_dir(self, namespaced_id):
+        """Path-traversal-safe, per-root: identify the OWNING root by its key, then
+        enumerate ONLY that root's discovered run dirs, exact-match the (bare)
+        run-id basename, and realpath-confine within that ONE root. A namespaced id
+        from root A can never enumerate or resolve within root B. Returns
+        ``(root_key, run_dir)`` or ``(root_key, None)`` — one uniform miss for "no
+        such run" and "escapes root" (no oracle)."""
+        root_key, data_root, run_id = self._owning_root(namespaced_id)
+        if data_root is None:
+            return "", None
         known = {Path(p).parent.name for p in
-                 glob.glob(str(Path(self.data_root) / "*" / "dag.json"))}
+                 glob.glob(str(Path(data_root) / "*" / "dag.json"))}
         if run_id not in known:
-            return None
-        run_dir = resolve_within(self.data_root, run_id)
-        return run_dir if run_dir and os.path.isdir(run_dir) else None
+            return root_key, None
+        run_dir = resolve_within(data_root, run_id)
+        confined = run_dir if run_dir and os.path.isdir(run_dir) else None
+        return root_key, confined
+
+    def _owning_root(self, namespaced_id):
+        """Resolve a (possibly namespaced) id to ``(root_key, data_root,
+        bare_run_id)``, or ``("", None, None)`` if no root owns it. Single-root ->
+        the sole root (empty key), id as-is. Multi-root -> split on the FIRST ':'
+        and match the key exactly so a bare id is never mis-split."""
+        if len(self.roots) == 1 and self.roots[0][0] == "":
+            return "", self.roots[0][1], namespaced_id
+        key, _, run_id = namespaced_id.partition(":")
+        for root_key, data_root in self.roots:
+            if root_key == key:
+                return root_key, data_root, run_id
+        return "", None, None
 
     def _serve_static(self, route):
         rel = route.lstrip("/") or "index.html"
@@ -473,52 +698,109 @@ def _content_type(path):
 # Wiring
 # ==========================================================================
 
-def build_server(root, assets_dir=None, port=DEFAULT_PORT):
-    """Build (but do not start) a ThreadingHTTPServer bound to 127.0.0.1.
+def build_server(root, assets_dir=None, port=DEFAULT_PORT, net=NetworkConfig()):
+    """Build (but do not start) a ThreadingHTTPServer.
 
-    ``root`` is the repo root; the data root is fixed to
-    ``realpath(root/docs/spec-loop)`` and resolved once here as the single
-    trust boundary. ``assets_dir`` defaults to this script's bundled
-    ``dashboard_assets/``. Port 0 -> an ephemeral port (used by tests)."""
-    data_root = os.path.realpath(os.path.join(str(root), *DATA_SUBPATH))
+    ``root`` is a repo root (str/Path) OR a list of repo roots. Each root's data
+    root is fixed to ``realpath(root/docs/spec-loop)`` and namespaced by a stable
+    per-root key (empty for a single root -> transparent, back-compatible).
+    ``assets_dir`` defaults to this script's bundled ``dashboard_assets/``.
+
+    ``net`` (a ``NetworkConfig``) carries the bind host and advertised port. The
+    bind host is the socket bind address ONLY and is decoupled from — and NEVER
+    widens — the Host-header allowlist. The allowlist is derived from the
+    advertised port (the published port a browser targets), defaulting to the
+    effective bound port. Port 0 -> an ephemeral port (used by tests). This is the
+    load-bearing anti-DNS-rebinding invariant: binding ``0.0.0.0`` does not add
+    any host to the allowlist."""
+    roots = _resolve_roots(root)
     if assets_dir is None:
         assets_dir = Path(__file__).resolve().parent / ASSETS_SUBPATH
     assets_root = os.path.realpath(str(assets_dir))
 
     handler = type("BoundDashboardHandler", (DashboardHandler,), {
-        "data_root": data_root,
+        "roots": roots,
         "assets_root": assets_root,
-        "allowed_hosts": _host_allowlist(port),
+        "allowed_hosts": set(),  # fixed below once the real port is known
     })
-    server = ThreadingHTTPServer(("127.0.0.1", port), handler)
-    # If port 0 was requested, fix the allowlist to the real assigned port.
-    if port == 0:
-        handler.allowed_hosts = _host_allowlist(server.server_address[1])
+    server = ThreadingHTTPServer((net.bind_host, port), handler)
+    # The advertised port drives the allowlist. A falsy advertise_port (None or 0)
+    # means "use the effective bound port" — so an ephemeral port 0, with or
+    # without an explicit advertise_port=0, still yields a reachable loopback
+    # allowlist and never an unreachable ":0" entry.
+    effective_advertise = net.advertise_port or server.server_address[1]
+    handler.allowed_hosts = _host_allowlist(effective_advertise)
     return server
 
 
+def _resolve_roots(root):
+    """Normalize ``root`` (a single repo root or a list) into an ordered list of
+    ``(root_key, data_root)`` pairs, where ``data_root`` is the realpath'd
+    ``<root>/docs/spec-loop`` trust boundary. A single root gets an empty key
+    (transparent, un-namespaced); multiple roots get stable, deterministic keys."""
+    raw = [root] if isinstance(root, (str, os.PathLike)) else list(root)
+    data_roots = [os.path.realpath(os.path.join(str(r), *DATA_SUBPATH))
+                  for r in raw]
+    if len(data_roots) == 1:
+        return [("", data_roots[0])]
+    return list(zip(_root_keys(raw), data_roots))
+
+
+def _root_keys(raw_roots):
+    """Deterministic, stable, collision-free key per root, derived from its
+    basename. Preserves input order; disambiguates duplicate basenames with a
+    stable index suffix so identically-named repos never share a namespace."""
+    basenames = [os.path.basename(os.path.normpath(str(r))) for r in raw_roots]
+    seen = {}
+    for name in basenames:
+        seen[name] = seen.get(name, 0) + 1
+    counters, keys = {}, []
+    for name in basenames:
+        if seen[name] == 1:
+            keys.append(name)
+        else:
+            counters[name] = counters.get(name, 0) + 1
+            keys.append(f"{name}#{counters[name]}")
+    return keys
+
+
 def _host_allowlist(port):
+    """Loopback-only allowlist keyed on the ADVERTISED port. Intentionally
+    hardcoded to 127.0.0.1/localhost — the bind host is never a member, so
+    binding 0.0.0.0 cannot widen it."""
     return {f"127.0.0.1:{port}", f"localhost:{port}"}
 
 
-def main() -> int:
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="read-only spec-loop dashboard server")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT,
-                    help=f"port to bind on 127.0.0.1 (default: {DEFAULT_PORT})")
-    ap.add_argument("--root", default=".",
-                    help="repo root containing docs/spec-loop (default: cwd)")
-    args = ap.parse_args()
+                    help=f"port to serve on (default: {DEFAULT_PORT})")
+    ap.add_argument("--root", action="append", default=None,
+                    help="repo root containing docs/spec-loop; repeat for "
+                         "multiple roots (default: cwd)")
+    ap.add_argument("--bind-host", default="127.0.0.1",
+                    help="socket bind address; use 0.0.0.0 ONLY inside a "
+                         "container (default: 127.0.0.1). Does NOT widen the "
+                         "Host-header allowlist.")
+    ap.add_argument("--advertise-port", type=int, default=None,
+                    help="published port a browser targets; drives the Host "
+                         "allowlist (default: --port).")
+    args = ap.parse_args(argv)
 
-    root = Path(args.root).resolve()
-    data_root = os.path.realpath(os.path.join(str(root), *DATA_SUBPATH))
-    if not os.path.isdir(data_root):
-        print(f"warning: {data_root} does not exist — no runs will be served",
-              file=sys.stderr)
+    raw_roots = args.root or ["."]
+    roots = [str(Path(r).resolve()) for r in raw_roots]
+    for _key, data_root in _resolve_roots(roots):
+        if not os.path.isdir(data_root):
+            print(f"warning: {data_root} does not exist — no runs from it",
+                  file=sys.stderr)
 
-    server = build_server(root, port=args.port)
+    server = build_server(roots, port=args.port,
+                          net=NetworkConfig(args.bind_host, args.advertise_port))
     bound_port = server.server_address[1]
-    print(f"spec-loop dashboard (read-only) serving {data_root}")
-    print(f"  open http://127.0.0.1:{bound_port}/   (Ctrl-C to stop)")
+    advertised = args.advertise_port or bound_port
+    print(f"spec-loop dashboard (read-only) serving {len(roots)} root(s)")
+    print(f"  bind {args.bind_host}:{bound_port}; "
+          f"open http://127.0.0.1:{advertised}/   (Ctrl-C to stop)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

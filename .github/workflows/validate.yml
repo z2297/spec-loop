@@ -18,9 +18,46 @@ jobs:
       - name: Self-contained manifest validation
         run: python3 scripts/validate_marketplace.py .
 
+      - name: Python unittest suite
+        # The suite spans two dirs: dev/CI tools in scripts/, and the shipped
+        # runtime (dashboard_*, pr_resolver) + their tests relocated into the
+        # plugin so a marketplace install is self-contained. Discover both.
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_*.py'
+          python3 -m unittest discover -s plugins/spec-loop/scripts -p 'test_*.py'
+
+      - name: Coverage floor gate (stdlib trace, no-regression)
+        # Per-file + total floors live in scripts/measure_coverage.py, set BELOW the
+        # measured coverable maxima by a >=5-point margin (local measurement vs this
+        # py3.12 runner can drift on co_lines() attribution). Fails closed: non-zero
+        # exit on any floor breach, a collapsed/empty suite, or a runaway OMIT.
+        run: python3 scripts/measure_coverage.py
+
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+
+      - name: Client JS test suite (Node built-ins)
+        # Two independent gates, both must pass:
+        #  1. node --test's own exit status — fails on ANY failing test.
+        #  2. a minimum test count parsed from the TAP summary — fails closed on an
+        #     emptied/truncated suite (`node --test` exits 0 on zero registered
+        #     tests), mirroring the Python lane's MIN_TESTS guard in
+        #     measure_coverage.py.
+        # A JS coverage NUMBER threshold is intentionally not gated: Node 20's
+        # --experimental-test-coverage is report-only (no per-metric threshold
+        # flags), so we surface the report and gate on test success + count instead.
+        run: |
+          out=$(node --test --experimental-test-coverage plugins/spec-loop/scripts/dashboard_assets/index.test.mjs 2>&1)
+          rc=$?
+          echo "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "FAIL: client JS test suite exited non-zero (rc=$rc)"; exit "$rc"
+          fi
+          ran=$(printf '%s\n' "$out" | sed -n 's/^# tests \([0-9][0-9]*\).*/\1/p')
+          if [ "${ran:-0}" -lt 12 ]; then
+            echo "FAIL: only ${ran:-0} client JS tests ran (expected >= 12)"; exit 1
+          fi
 
       - name: Install Claude Code CLI
         run: npm install -g @anthropic-ai/claude-code
