@@ -23,7 +23,7 @@ prior build. Pinned entries map to git tags `v<version>`.
 
 ## [Unreleased]
 
-## [1.2.0] - 2026-06-29
+## [1.2.1] - 2026-07-06
 ### Added
 - **Stage-aware dashboard.** The run-detail view (both the `/spec-loop:dashboard` terminal
   view and the `/spec-loop:dashboard-serve` web SPA) now presents a run as a **pipeline of
@@ -54,30 +54,6 @@ prior build. Pinned entries map to git tags `v<version>`.
   the Executive Readout is then printed verbatim as the run's final terminal output, replacing
   the previous ephemeral hand-written summary. The web dashboard's per-run scan now reports a
   read-only `has_runbook` flag.
-- `/spec-loop:dashboard` — a read-only slash command that renders a terminal-markdown
-  dashboard of a spec-loop run (DAG, derived waves, per-slice status, open escalations,
-  recent decisions) from the durable artifacts under `docs/spec-loop/<run-id>/`. Mutates
-  nothing and triggers no slice work.
-- Web dashboard — a read-only, modern dark-theme single-page web UI (zero-dependency,
-  served by a stdlib `http.server`) that renders the same run view in a browser: an
-  all-runs overview and a single-run drill-down (DAG/waves, slice table, status rollup,
-  open escalations, recent decisions), with near-real-time auto-refresh (~2.5s polling +
-  ETag/304) and a freshness indicator. Strictly read-only (`GET`/`HEAD` only, `127.0.0.1`
-  bind, no mutation endpoints). Launch it with the new `/spec-loop:dashboard-serve`
-  command, which starts the plugin-bundled `dashboard_launcher.py` (Docker-preferred,
-  Python-fallback) and prints the local URL.
-- `/spec-loop:peer-review` — a strictly **read-only** multi-provider peer-review loop. It
-  resolves a real pull request (GitHub / Azure DevOps / Bitbucket URL, or an explicit local
-  `--base/--head` ref-range) and materializes its diff read-only via the plugin-bundled `pr_resolver.py`,
-  then convenes five `peer-review-*` reviewers (`peer-review-conformance`, `-correctness`,
-  `-design`, `-risk`, `-tests`) plus a report-only `pr-review-toolkit:review-pr` pass through
-  the new `peer-review-council` skill, and publishes **one** pinned-schema report at
-  `docs/pr-review/<review-id>/review-report.md`. It changes no implementation — there is no
-  auto-fix loop, no `simplify` pass, no quality-gate, and no provider write-back (commenting /
-  approving / merging is a deliberate future follow-on). The command's read-only contract is
-  now machine-enforced: `scripts/validate_marketplace.py` asserts that any command marked
-  read-only (including this one and the two dashboard commands) does not grant `Edit` in its
-  `allowed-tools`.
 - **The dashboard and peer-review runtime now ships inside the plugin**, so
   `/spec-loop:dashboard-serve` and `/spec-loop:peer-review` work on a marketplace install
   (previously they invoked repo-root `scripts/…` by a relative path that did not exist for
@@ -119,6 +95,32 @@ prior build. Pinned entries map to git tags `v<version>`.
   frontmatter — it injects no `model:` into any `superpowers` or `pr-review-toolkit` dispatch, so
   their own model choices (e.g. `code-reviewer`/`code-simplifier` pinned to opus) remain honored.
 
+## [1.2.0] - 2026-06-29
+### Added
+- `/spec-loop:dashboard` — a read-only slash command that renders a terminal-markdown
+  dashboard of a spec-loop run (DAG, derived waves, per-slice status, open escalations,
+  recent decisions) from the durable artifacts under `docs/spec-loop/<run-id>/`. Mutates
+  nothing and triggers no slice work.
+- Web dashboard — a read-only, modern dark-theme single-page web UI (zero-dependency,
+  served by a stdlib `http.server`) that renders the same run view in a browser: an
+  all-runs overview and a single-run drill-down (DAG/waves, slice table, status rollup,
+  open escalations, recent decisions), with near-real-time auto-refresh (~2.5s polling +
+  ETag/304) and a freshness indicator. Strictly read-only (`GET`/`HEAD` only, `127.0.0.1`
+  bind, no mutation endpoints). Launch it with the new `/spec-loop:dashboard-serve`
+  command, which starts `scripts/dashboard_server.py` and prints the local URL.
+- `/spec-loop:peer-review` — a strictly **read-only** multi-provider peer-review loop. It
+  resolves a real pull request (GitHub / Azure DevOps / Bitbucket URL, or an explicit local
+  `--base/--head` ref-range) and materializes its diff read-only via `scripts/pr_resolver.py`,
+  then convenes five `peer-review-*` reviewers (`peer-review-conformance`, `-correctness`,
+  `-design`, `-risk`, `-tests`) plus a report-only `pr-review-toolkit:review-pr` pass through
+  the new `peer-review-council` skill, and publishes **one** pinned-schema report at
+  `docs/pr-review/<review-id>/review-report.md`. It changes no implementation — there is no
+  auto-fix loop, no `simplify` pass, no quality-gate, and no provider write-back (commenting /
+  approving / merging is a deliberate future follow-on). The command's read-only contract is
+  now machine-enforced: `scripts/validate_marketplace.py` asserts that any command marked
+  read-only (including this one and the two dashboard commands) does not grant `Edit` in its
+  `allowed-tools`.
+
 ## [1.0.0] - 2026-06-25
 ### Added
 - Stable / beta / alpha release channels and a pinned version archive, all served
@@ -147,7 +149,8 @@ prior build. Pinned entries map to git tags `v<version>`.
 - Post-review code-quality gate: an objective complexity/length/CRAP metric gate
   with a bounded, behavior-preserving refactor loop before merge.
 
-[Unreleased]: https://github.com/z2297/spec-loop/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/z2297/spec-loop/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/z2297/spec-loop/releases/tag/v1.2.1
 [1.2.0]: https://github.com/z2297/spec-loop/releases/tag/v1.2.0
 [1.0.0]: https://github.com/z2297/spec-loop/releases/tag/v1.0.0
 [0.4.0]: https://github.com/z2297/spec-loop/releases/tag/v0.4.0
