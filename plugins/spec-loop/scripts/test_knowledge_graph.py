@@ -283,6 +283,58 @@ class TestPathSafety(TempVault):
 
 
 # --------------------------------------------------------------------------
+# Secret redaction — the deterministic floor
+# --------------------------------------------------------------------------
+
+class TestRedaction(TempVault):
+    def test_known_token_shapes_redacted(self):
+        obs = ("Configured with ghp_" + "a" * 36
+               + " and password=hunter2secret for the smoke test.")
+        res = self.upsert({"type": "decision", "id": "d-sec", "title": "Sec",
+                           "repo": "jobs", "observation": obs},
+                          run_id="run-1", date="2026-07-01")
+        text = self.read("decision", "d-sec")
+        self.assertNotIn("ghp_", text)
+        self.assertNotIn("hunter2secret", text)
+        self.assertIn("[REDACTED]", text)
+        self.assertEqual(res["redactions"], 2)
+
+    def test_key_shapes_and_jwt_redacted(self):
+        text, count = kg.redact_secrets(
+            "AKIAABCDEFGHIJKLMNOP then sk-" + "x" * 24
+            + " then eyJ" + "h" * 24 + "." + "p" * 16 + ".sig"
+            + " then xoxb-1234567890-abcdef")
+        self.assertEqual(count, 4)
+        self.assertNotIn("AKIA", text)
+        self.assertNotIn("sk-", text)
+        self.assertNotIn("eyJ", text)
+        self.assertNotIn("xoxb", text)
+
+    def test_pem_block_redacted(self):
+        text, count = kg.redact_secrets(
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEow…\n-----END RSA PRIVATE KEY-----")
+        self.assertEqual(count, 1)
+        self.assertNotIn("MIIEow", text)
+
+    def test_benign_prose_untouched(self):
+        prose = ("The token refresh flow rotates the api key nightly; "
+                 "no secret leaves the vault.")
+        text, count = kg.redact_secrets(prose)
+        self.assertEqual(count, 0)
+        self.assertEqual(text, prose)
+
+    def test_batch_reports_redaction_count(self):
+        result = kg._run_batch({
+            "vault": self.vault, "subfolder": self.subfolder,
+            "run_id": "run-1", "date": "2026-07-01", "repo": "jobs",
+            "nodes": [{"type": "decision", "id": "d1", "title": "D1",
+                       "observation": "api_key=abcdefgh12345678 was rotated."}],
+        })
+        self.assertEqual(result["redactions"], 1)
+        self.assertNotIn("abcdefgh12345678", self.read("decision", "d1"))
+
+
+# --------------------------------------------------------------------------
 # Query + batch CLI path
 # --------------------------------------------------------------------------
 

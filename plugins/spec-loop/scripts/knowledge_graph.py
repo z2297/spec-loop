@@ -117,6 +117,53 @@ def slugify(text):
 
 
 # --------------------------------------------------------------------------
+# Secret redaction — deterministic floor beneath the skill's model-side guard
+# --------------------------------------------------------------------------
+
+# Unambiguous token shapes only — no entropy heuristics, since a false positive
+# in a personal vault is worse than a conservative floor.
+_SECRET_PATTERNS = [
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),                       # AWS access key id
+    re.compile(r"\bghp_[A-Za-z0-9]{36}\b"),                    # GitHub classic PAT
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),           # GitHub fine-grained PAT
+    re.compile(r"\bsk-[A-Za-z0-9_-]{20,}"),                    # sk-/sk-ant- API keys
+    re.compile(r"\bxox[bpsa]-[A-Za-z0-9-]{10,}"),              # Slack tokens
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?"
+               r"(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)"),    # PEM private keys
+    re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}"
+               r"\.[A-Za-z0-9_-]*"),                           # JWTs
+]
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b(password|passwd|secret|token|api[_-]?key|authorization)\b"
+    r"(\s*[:=]\s*)(\S{8,})")
+
+
+def redact_secrets(text):
+    """Redact well-known secret shapes to ``[REDACTED]``; return ``(text, count)``.
+
+    The skill's model-side redaction stays the first line of defense (it sees
+    context these regexes can't); this is the script-enforced floor applied to
+    every field before it reaches the vault.
+    """
+    if not text:
+        return text, 0
+    count = 0
+    for pattern in _SECRET_PATTERNS:
+        text, n = pattern.subn("[REDACTED]", text)
+        count += n
+
+    def _assignment(match):
+        nonlocal count
+        if match.group(3) == "[REDACTED]":
+            return match.group(0)
+        count += 1
+        return f"{match.group(1)}{match.group(2)}[REDACTED]"
+
+    text = _SECRET_ASSIGNMENT.sub(_assignment, text)
+    return text, count
+
+
+# --------------------------------------------------------------------------
 # Minimal frontmatter reader / writer (only the fixed schema this module emits)
 # --------------------------------------------------------------------------
 
@@ -340,6 +387,13 @@ def upsert_node(vault_root, subfolder, node, run_id, date):
     if abspath is None:
         raise ValueError(f"unsafe note path: {relpath!r}")
 
+    node = dict(node)
+    redactions = 0
+    for field in ("title", "summary", "observation", "index"):
+        if node.get(field):
+            node[field], n = redact_secrets(node[field])
+            redactions += n
+
     repo = node.get("repo") or ""
     existing = _read_note(abspath)
     if existing is not None:
@@ -384,7 +438,7 @@ def upsert_node(vault_root, subfolder, node, run_id, date):
     os.makedirs(os.path.dirname(abspath), exist_ok=True)
     with open(abspath, "w", encoding="utf-8") as fh:
         fh.write(text)
-    return {"path": abspath, "created": was_created}
+    return {"path": abspath, "created": was_created, "redactions": redactions}
 
 
 def _default_tags(node_type, repo):
@@ -518,10 +572,12 @@ def _run_batch(payload):
     date = payload["date"]
     default_repo = payload.get("repo", "")
     results, errors, refs = [], [], []
+    redactions = 0
     for node in payload.get("nodes", []):
         node.setdefault("repo", default_repo)
         try:
             res = upsert_node(vault, subfolder, node, run_id, date)
+            redactions += res.get("redactions", 0)
             results.append({"type": node["type"], "id": slugify(node["id"]),
                             "created": res["created"], "path": res["path"]})
             refs.append({"type": node["type"], "id": node["id"],
@@ -542,7 +598,7 @@ def _run_batch(payload):
             errors.append({"node": f"run:{run_id}", "error": str(exc)})
     return {"upserted": len(results), "created": sum(1 for r in results if r["created"]),
             "updated": sum(1 for r in results if not r["created"]),
-            "nodes": results, "errors": errors}
+            "redactions": redactions, "nodes": results, "errors": errors}
 
 
 def main(argv=None):
