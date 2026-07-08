@@ -95,6 +95,41 @@ prior build. Pinned entries map to git tags `v<version>`.
     `runbook` write notes — **slice workers never touch the vault**, so the loop's parallel
     execution is unaffected. The runbook records a `knowledge_graph` block in its front-matter
     for traceability.
+- **Knowledge graph read path.** The graph is no longer write-only: a new read-only
+  `knowledge_graph.py context` subcommand returns a bounded prior-knowledge summary for a
+  repo (system hub one-liner, ALL patterns — they are cross-repo by design — plus repo-scoped
+  domain notes and non-superseded decisions, and `known_ids` per type), and the controller
+  surfaces it at Phase 0 intake as a `## Prior knowledge (knowledge graph)` section of the
+  conventions summary handed to every council and slice worker. Complements (never replaces)
+  plain-file cross-run learning; one serial call, fail-open, never gates intake.
+- **Deterministic secret redaction in the knowledge-graph helper.** `redact_secrets()` scrubs
+  well-known token shapes (AWS keys, GitHub PATs, `sk-` keys, Slack tokens, PEM private-key
+  blocks, JWTs) and explicit `key=value` assignment forms from every node field before it
+  reaches the vault, reporting a `redactions` count — a script-enforced floor beneath the
+  skill's model-side redaction guard.
+- **Conservative id-drift remap.** A batch upsert of a new `pattern`/`component`/`system`/
+  `domain` id that has no existing note is remapped onto the ONE existing note it plainly
+  meant (same id modulo a `-<type>` suffix, or slugified-title match); zero or multiple
+  candidates create as given — never guess. Same-payload links are rewritten and `remapped`
+  pairs are reported for the caller's log. Backstops the "reference before creating" rule so
+  id drift can't silently fork accumulation.
+- **MCP enrichment budget.** The `knowledge-graph` skill now caps `mcp-preferred` discovery:
+  one probe per invocation, ≤3 searches at a wave boundary (skipped entirely for large
+  waves), ≤5 at runbook synthesis, always aimed outside the spec-loop subfolder (the helper's
+  disk scans already cover the inside).
+
+### Fixed
+- **Knowledge-graph run MOC now genuinely refreshes.** The grouped listing moved into a
+  managed `<!-- kg:index -->` region replaced wholesale on every build (previously the body
+  was written only on first create, so Phase 5 "finalize the MOC" left the Phase 1 listing
+  stale). Pre-region MOC bodies from earlier alpha builds are upgraded in place on the next
+  run — no user action needed, no file renames.
+- **Knowledge-graph observation blocks are idempotent under retry.** Re-invoking an identical
+  batch (controller retry, resumed runbook) no longer appends duplicate dated observation
+  blocks; an identical payload now leaves the vault byte-identical.
+- **Finalized run MOC includes wave-boundary nodes.** MOC refs are collected by scanning the
+  vault for every node whose `runs` include the run-id (`query --run`), so decisions recorded
+  at wave boundaries appear in the Phase 5 MOC without being re-upserted.
 
 ### Changed
 - `escalation-gate` now lists `quality-gate-block` as its fifth surface trigger — the

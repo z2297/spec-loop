@@ -120,6 +120,15 @@ proceed without them.
    a key-file map): hold it now, pass it to the intake council in step 6, and
    persist it as `docs/spec-loop/<run-id>/conventions.md` in Phase 1.3 — every
    slice worker and council convening reads it instead of re-exploring.
+   - **Prior knowledge (only if the knowledge graph is enabled).** If
+     `~/.claude/spec-loop/knowledge-graph.json` is `enabled` with a `vault_path`, run one
+     read-only helper call —
+     `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/knowledge_graph.py" context --vault <vault_path> --subfolder <subfolder> --repo <repo-slug>`
+     — and append a short `## Prior knowledge (knowledge graph)` section to the conventions
+     summary: the system hub one-liner, existing patterns (cross-repo) with their
+     one-liners, active decisions and domain notes for this repo, and the `known_ids` lists
+     with an instruction to reuse those exact ids in any later graph writes. If the call
+     fails or the graph is disabled, omit the section silently — this never gates intake.
 6. **Convene the Iron Council on the request (intake).** Intake always convenes
    the full five — tier-scaled composition applies only at pre-execution (there is
    no tier before decomposition). Before decomposing, invoke the `iron-council`
@@ -307,7 +316,10 @@ background dispatch to work below depth 1.
    escalation** from step 6 — each linking to the `run`, the repo `system`, and the
    `component` hubs it touched (the helper creates those hubs on reference). Keep it to the
    *material* decisions, not every logged line. This is one serial helper call in the main
-   session at the wave boundary; if disabled, skip silently.
+   session at the wave boundary; if disabled, skip silently. The helper is idempotent under
+   retry (re-invoking the same batch after an interruption leaves the vault unchanged); its
+   result reports `redactions` and `remapped` counts — include them in the one-line digest
+   logged to `decisions-log.md`.
 
 ## Phase 4 — Loop
 

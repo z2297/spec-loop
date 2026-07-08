@@ -68,6 +68,10 @@ is a distributed plugin, so no vault location is ever assumed.
 ## Notes
 - **No machine-specific defaults.** `vault_path` has no assumed value; the feature stays
   inert until the user provides one. This keeps the distributed plugin portable across users.
+- **Enabling implies read + write.** Besides recording notes, the loop surfaces prior
+  knowledge from the vault at run intake (existing patterns, active decisions, domain notes)
+  into the run's conventions summary — one `context` helper call that only reads the vault
+  and never blocks. There is no separate toggle.
 - The graph is plain markdown + `[[wikilinks]]` + YAML frontmatter — Obsidian derives the
   graph view from the links; nothing needs Obsidian running to *write* the notes (it indexes
   them on next open). `mcp-preferred` only changes *how* notes are written, not the result.

@@ -329,6 +329,12 @@ duplicating it), so Obsidian's graph view becomes a navigable map of your codeba
   API MCP reachable, it uses it (live indexing + cross-vault link discovery); otherwise it
   writes the markdown straight to disk (Obsidian indexes it on next open). Requires an Obsidian
   vault; the Obsidian app is **not** required for writes.
+- **The graph feeds the loop back.** At run intake the controller pulls a bounded
+  prior-knowledge summary from the vault (existing patterns — including ones learned in
+  *other* repos — plus this repo's active decisions and domain notes) into the run's
+  conventions summary, so councils and slice workers see what earlier runs established.
+  Notes are scrubbed by a deterministic secret-redaction floor before they ever reach the
+  vault.
 
 ## Components
 
