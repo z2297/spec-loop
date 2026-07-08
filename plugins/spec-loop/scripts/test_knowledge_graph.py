@@ -116,6 +116,25 @@ class TestUpsert(TempVault):
         self.assertIn("Deposits spread across projects on creation.", text)
         self.assertIn("Refined via event bus.", text)
 
+    def test_identical_observation_not_duplicated_on_retry(self):
+        node = {"type": "decision", "id": "d-retry", "title": "Retry", "repo": "jobs",
+                "observation": "Chose the event bus."}
+        self.upsert(node, run_id="run-1", date="2026-07-01")
+        self.upsert(node, run_id="run-1", date="2026-07-01")
+        text = self.read("decision", "d-retry")
+        self.assertEqual(text.count("### run-1 — 2026-07-01"), 1)
+        self.assertEqual(text.count("Chose the event bus."), 1)
+
+    def test_different_observation_same_run_still_appends(self):
+        base = {"type": "decision", "id": "d-waves", "title": "Waves", "repo": "jobs"}
+        self.upsert({**base, "observation": "Wave 1: first."},
+                    run_id="run-1", date="2026-07-01")
+        self.upsert({**base, "observation": "Wave 2: second."},
+                    run_id="run-1", date="2026-07-01")
+        text = self.read("decision", "d-waves")
+        self.assertIn("Wave 1: first.", text)
+        self.assertIn("Wave 2: second.", text)
+
     def test_tags_union_includes_repo(self):
         self.upsert({"type": "decision", "id": "d1", "repo": "jobs", "title": "D1"},
                     run_id="run-1", date="2026-07-01")
@@ -165,6 +184,54 @@ class TestRunMoc(TempVault):
         self.assertIn("[[d1|Decision one]]", text)
         self.assertIn("[[outbox|Outbox pattern]]", text)
         self.assertIn("Add deposits", text)
+
+    def test_moc_body_refreshes_with_superset_refs(self):
+        refs = [{"type": "decision", "id": "d1", "title": "Decision one"}]
+        kg.build_run_moc(self.vault, self.subfolder, "run-1", "2026-07-01",
+                         "Add deposits", "jobs", refs)
+        refs.append({"type": "pattern", "id": "outbox", "title": "Outbox pattern"})
+        kg.build_run_moc(self.vault, self.subfolder, "run-1", "2026-07-06",
+                         "Add deposits", "jobs", refs)
+        text = self.read("run", "run-1")
+        self.assertEqual(text.count("[[d1|Decision one]]"), 1)
+        self.assertEqual(text.count("[[outbox|Outbox pattern]]"), 1)
+        self.assertEqual(text.count("## Decisions"), 1)
+        self.assertEqual(text.count("## Patterns"), 1)
+
+    def test_legacy_v1_moc_body_upgraded_in_place(self):
+        # A pre-kg:index MOC: grouped listing as plain prose, then a Links region.
+        rel = kg.note_relpath(self.subfolder, "run", "run-old")
+        path = Path(self.vault, rel)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "---\ntype: run\nid: run-old\ntitle: Run run-old\n"
+            "tags: [spec-loop, run]\nruns: [run-old]\n"
+            "created: 2026-07-01\nupdated: 2026-07-01\n---\n"
+            "Knowledge-graph index for spec-loop run `run-old` — Old request.\n\n"
+            "## Decisions\n\n- [[stale|Stale decision]]\n\n"
+            "## Links\n\n<!-- kg:links -->\n- [[stale]]\n<!-- /kg:links -->\n",
+            encoding="utf-8")
+        refs = [{"type": "decision", "id": "fresh", "title": "Fresh decision"}]
+        kg.build_run_moc(self.vault, self.subfolder, "run-old", "2026-07-06",
+                         "Old request", "jobs", refs)
+        text = self.read("run", "run-old")
+        # Stale prose listing replaced by the managed region; links accumulate.
+        self.assertIn("<!-- kg:index -->", text)
+        self.assertIn("[[fresh|Fresh decision]]", text)
+        self.assertNotIn("[[stale|Stale decision]]", text)
+        self.assertIn("- [[stale]]", text)  # Links region untouched
+        self.assertIn("Knowledge-graph index for spec-loop run `run-old`", text)
+        self.assertEqual(text.count("## Decisions"), 1)
+
+    def test_non_run_note_body_untouched_without_index(self):
+        self.upsert({"type": "pattern", "id": "outbox", "title": "Outbox",
+                     "summary": "Knowledge lives in prose the model wrote."},
+                    run_id="run-1", date="2026-07-01")
+        before = self.read("pattern", "outbox")
+        self.upsert({"type": "pattern", "id": "outbox", "title": "Outbox"},
+                    run_id="run-1", date="2026-07-01")
+        self.assertEqual(before, self.read("pattern", "outbox"))
+        self.assertNotIn("<!-- kg:index -->", before)
 
 
 # --------------------------------------------------------------------------
@@ -245,6 +312,60 @@ class TestQueryAndBatch(TempVault):
         self.assertEqual(result["created"], 2)
         self.assertEqual(result["errors"], [])
         self.assertTrue(Path(self.vault, self.subfolder, "Runs", "run-1.md").exists())
+
+    def test_query_run_filter(self):
+        self.upsert({"type": "decision", "id": "d1", "title": "D1", "repo": "jobs"},
+                    run_id="run-1", date="2026-07-01")
+        self.upsert({"type": "decision", "id": "d2", "title": "D2", "repo": "jobs"},
+                    run_id="run-2", date="2026-07-02")
+        found = kg.query_nodes(self.vault, self.subfolder, run_id="run-1")
+        self.assertEqual([n["id"] for n in found], ["d1"])
+
+    def test_moc_includes_nodes_from_earlier_batches(self):
+        # Wave-boundary batch: decisions, no MOC.
+        kg._run_batch({
+            "vault": self.vault, "subfolder": self.subfolder,
+            "run_id": "run-1", "date": "2026-07-01", "repo": "jobs",
+            "nodes": [{"type": "decision", "id": "d1", "title": "D1"},
+                      {"type": "decision", "id": "d2", "title": "D2"}],
+        })
+        # Runbook batch: one pattern, MOC finalized.
+        result = kg._run_batch({
+            "vault": self.vault, "subfolder": self.subfolder,
+            "run_id": "run-1", "date": "2026-07-06", "repo": "jobs",
+            "nodes": [{"type": "pattern", "id": "outbox", "title": "Outbox"}],
+            "moc": {"request_title": "Add deposits"},
+        })
+        self.assertEqual(result["errors"], [])
+        text = self.read("run", "run-1")
+        for link in ("[[d1|D1]]", "[[d2|D2]]", "[[outbox|Outbox]]"):
+            self.assertIn(link, text)
+
+    def test_batch_retry_is_byte_identical(self):
+        payload = {
+            "vault": self.vault, "subfolder": self.subfolder,
+            "run_id": "run-1", "date": "2026-07-06", "repo": "jobs",
+            "nodes": [
+                {"type": "system", "id": "jobs", "title": "Jobs",
+                 "summary": "The jobs service.",
+                 "observation": "Seeded by run-1."},
+                {"type": "decision", "id": "d1", "title": "D1",
+                 "observation": "Wave 1: chose the event bus.",
+                 "links": ["jobs"]},
+            ],
+            "moc": {"request_title": "Add deposits"},
+        }
+        def snapshot():
+            files = {}
+            for root, _dirs, names in os.walk(self.vault):
+                for name in sorted(names):
+                    p = Path(root, name)
+                    files[str(p.relative_to(self.vault))] = p.read_bytes()
+            return files
+        kg._run_batch(payload)
+        first = snapshot()
+        kg._run_batch(payload)
+        self.assertEqual(first, snapshot())
 
     def test_batch_collects_errors_without_raising(self):
         payload = {

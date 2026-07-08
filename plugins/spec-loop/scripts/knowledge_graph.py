@@ -64,8 +64,14 @@ MAX_SLUG_LEN = 80
 
 # Managed body regions, delimited by HTML comments so upserts can find and rewrite
 # them deterministically without disturbing the human-authored summary above them.
+# Observations append, links union, the index is replaced wholesale (a snapshot).
 _OBS_OPEN, _OBS_CLOSE = "<!-- kg:observations -->", "<!-- /kg:observations -->"
 _LINKS_OPEN, _LINKS_CLOSE = "<!-- kg:links -->", "<!-- /kg:links -->"
+_IDX_OPEN, _IDX_CLOSE = "<!-- kg:index -->", "<!-- /kg:index -->"
+
+# Opening prose the pre-kg:index versions of build_run_moc wrote verbatim; used to
+# detect and upgrade those stale MOC bodies in place.
+_V1_MOC_SENTINEL = "Knowledge-graph index for spec-loop run"
 
 # Canonical frontmatter key order for stable, diff-friendly output.
 _FM_ORDER = ["type", "id", "title", "tags", "repo", "runs",
@@ -208,16 +214,23 @@ def _extract_region(body, open_tag, close_tag):
 
 
 def _merge_observation(body, run_id, date, note):
-    """Append a dated observation block, creating the region if needed."""
+    """Append a dated observation block, creating the region if needed.
+
+    Idempotent under retry: an identical block (same run, date, and text) is not
+    appended twice, so a re-invoked batch leaves the note byte-identical.
+    """
     if not note:
         return body
     block = f"### {run_id} — {date}\n\n{note.strip()}"
     region = _extract_region(body, _OBS_OPEN, _OBS_CLOSE)
     if region is None:
+        if block in body:
+            return body
         section = f"\n## Observations\n\n{_OBS_OPEN}\n{block}\n{_OBS_CLOSE}\n"
         return body.rstrip("\n") + "\n" + section
     before, inner, after = region
-    # Idempotency: don't duplicate an identical block for the same run.
+    if block in inner:
+        return body
     inner = f"{inner}\n\n{block}".strip("\n") if inner else block
     return f"{before}{_OBS_OPEN}\n{inner}\n{_OBS_CLOSE}{after}"
 
@@ -247,6 +260,35 @@ def _merge_links(body, links):
     if region is not None:
         return f"{before}{section}{after}"
     return f"{before}\n## Links\n\n{section}\n"
+
+
+def _replace_index(body, rendered):
+    """Replace the managed index region wholesale — the index is a snapshot of
+    the current state (a run MOC's grouped listing), not an accumulation.
+
+    Bodies written before the region existed carried the rendered index as plain
+    prose; those are detected by the exact sentinel they opened with and rebuilt
+    as intro line + managed region, preserving any managed sections that follow.
+    """
+    if not rendered:
+        return body
+    section = f"{_IDX_OPEN}\n{rendered.strip()}\n{_IDX_CLOSE}"
+    region = _extract_region(body, _IDX_OPEN, _IDX_CLOSE)
+    if region is not None:
+        before, _inner, after = region
+        return f"{before}{section}{after}"
+    stripped = body.lstrip()
+    if stripped.startswith(_V1_MOC_SENTINEL):
+        cut = len(body)
+        for marker in ("## Links", "## Observations", _LINKS_OPEN, _OBS_OPEN):
+            idx = body.find(marker)
+            if idx != -1:
+                cut = min(cut, idx)
+        intro = stripped.splitlines()[0]
+        tail = body[cut:].strip("\n")
+        text = f"{intro}\n\n{section}\n"
+        return text + (f"\n{tail}\n" if tail else "")
+    return body.rstrip("\n") + f"\n\n{section}\n"
 
 
 def _wikilink(target):
@@ -285,10 +327,11 @@ def upsert_node(vault_root, subfolder, node, run_id, date):
     """Create or idempotently update one node's note.
 
     ``node`` is a dict: ``{type, id, title, repo?, summary?, observation?,
-    links?, status?, reversibility?}``. On an existing note we union ``tags``,
-    append ``run_id`` to ``runs`` (deduped), bump ``updated``, append a dated
-    observation block, and merge links — never duplicating. Returns
-    ``{path, created}``. Raises ``ValueError`` only on an unsafe/invalid target.
+    index?, links?, status?, reversibility?}``. On an existing note we union
+    ``tags``, append ``run_id`` to ``runs`` (deduped), bump ``updated``, append a
+    dated observation block, replace the ``index`` region wholesale, and merge
+    links — never duplicating. Returns ``{path, created}``. Raises ``ValueError``
+    only on an unsafe/invalid target.
     """
     node_type = node["type"]
     node_id = slugify(node["id"])
@@ -330,6 +373,7 @@ def upsert_node(vault_root, subfolder, node, run_id, date):
     if node.get("reversibility"):
         fm["reversibility"] = node["reversibility"]
 
+    body = _replace_index(body, node.get("index"))
     body = _merge_observation(body, run_id, date, node.get("observation"))
     body = _merge_links(body, node.get("links"))
 
@@ -369,14 +413,14 @@ def build_run_moc(vault_root, subfolder, run_id, date, request_title, repo, node
     """Write/refresh the ``Runs/<run-id>.md`` MOC linking every node the run touched.
 
     ``node_refs`` is a list of ``{type, id, title}``. The MOC groups links by type
-    and back-links the run's artifacts directory. Implemented as an upsert so a
-    re-run of the same run-id refreshes rather than duplicates.
+    inside the managed ``kg:index`` region, which is replaced wholesale on every
+    call — so a re-run of the same run-id genuinely refreshes the listing (and a
+    pre-region stale body is upgraded in place by ``_replace_index``).
     """
     by_type = {}
     for ref in node_refs:
         by_type.setdefault(ref["type"], []).append(ref)
-    lines = [f"Knowledge-graph index for spec-loop run `{run_id}`"
-             + (f" — {request_title}" if request_title else "") + ".", ""]
+    lines = []
     for node_type in TYPE_DIRS:
         refs = by_type.get(node_type)
         if not refs:
@@ -392,16 +436,20 @@ def build_run_moc(vault_root, subfolder, run_id, date, request_title, repo, node
         "id": run_id,
         "title": f"Run {run_id}",
         "repo": repo,
-        "summary": "\n".join(lines).strip(),
+        "summary": f"{_V1_MOC_SENTINEL} `{run_id}`"
+                   + (f" — {request_title}" if request_title else "") + ".",
+        "index": "\n".join(lines).strip(),
         "links": [slugify(r["id"]) for r in node_refs],
     }
     return upsert_node(vault_root, subfolder, node, run_id, date)
 
 
-def query_nodes(vault_root, subfolder, node_type=None, tag=None, term=None):
+def query_nodes(vault_root, subfolder, node_type=None, tag=None, term=None,
+                run_id=None):
     """Scan the vault (disk fallback for reference/dedup) and return matching nodes
     as ``{path, id, title, type, tags}``. Used before creating a node to find an
-    existing one to update/link instead of duplicating.
+    existing one to update/link instead of duplicating, and (with ``run_id``) to
+    collect every node a run touched.
     """
     types = [node_type] if node_type else list(TYPE_DIRS)
     results = []
@@ -422,6 +470,8 @@ def query_nodes(vault_root, subfolder, node_type=None, tag=None, term=None):
                 continue
             if term and term.lower() not in text.lower():
                 continue
+            if run_id and run_id not in _as_list(fm.get("runs")):
+                continue
             results.append({
                 "path": os.path.join(absdir, name),
                 "id": fm.get("id", name[:-3]),
@@ -430,6 +480,22 @@ def query_nodes(vault_root, subfolder, node_type=None, tag=None, term=None):
                 "tags": tags,
             })
     return results
+
+
+def _collect_run_refs(vault_root, subfolder, run_id):
+    """Every non-run node in the vault touched by ``run_id``, as MOC refs.
+
+    Sorted by ``(type, id)`` so repeated MOC builds are deterministic. Returns
+    ``[]`` on any scan problem (the caller falls back to in-batch refs).
+    """
+    try:
+        found = query_nodes(vault_root, subfolder, run_id=run_id)
+    except (ValueError, OSError):
+        return []
+    refs = [{"type": n["type"], "id": n["id"], "title": n["title"]}
+            for n in found if n["type"] != "run"]
+    refs.sort(key=lambda r: (r["type"], r["id"]))
+    return refs
 
 
 # --------------------------------------------------------------------------
@@ -465,8 +531,13 @@ def _run_batch(payload):
     moc = payload.get("moc")
     if moc:
         request_title = moc.get("request_title", "") if isinstance(moc, dict) else ""
+        # The batch's own nodes are already on disk, so a vault scan yields every
+        # node this run touched — including earlier batches (wave boundaries) —
+        # not just this payload. Fall back to in-batch refs if the scan fails.
+        moc_refs = _collect_run_refs(vault, subfolder, run_id) or refs
         try:
-            build_run_moc(vault, subfolder, run_id, date, request_title, default_repo, refs)
+            build_run_moc(vault, subfolder, run_id, date, request_title, default_repo,
+                          moc_refs)
         except (ValueError, OSError) as exc:
             errors.append({"node": f"run:{run_id}", "error": str(exc)})
     return {"upserted": len(results), "created": sum(1 for r in results if r["created"]),
@@ -502,6 +573,7 @@ def main(argv=None):
     p_q.add_argument("--type", choices=list(TYPE_DIRS))
     p_q.add_argument("--tag")
     p_q.add_argument("--term")
+    p_q.add_argument("--run", help="only nodes whose frontmatter runs include this run-id")
 
     args = parser.parse_args(argv)
     try:
@@ -517,7 +589,8 @@ def main(argv=None):
             result = {"created": res["created"], "path": res["path"]}
         else:  # query
             result = {"nodes": query_nodes(args.vault, args.subfolder,
-                                           args.type, args.tag, args.term)}
+                                           args.type, args.tag, args.term,
+                                           run_id=args.run)}
     except (ValueError, OSError, json.JSONDecodeError) as exc:
         print(json.dumps({"error": str(exc)}))
         return 1
