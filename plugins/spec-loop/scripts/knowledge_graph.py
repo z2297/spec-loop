@@ -29,7 +29,8 @@ CLI (used by the skill)::
 
     python3 knowledge_graph.py batch   < payload.json     # upsert many nodes + MOC
     python3 knowledge_graph.py upsert  --vault ... --type decision --id ... ...
-    python3 knowledge_graph.py query   --vault ... [--type ...] [--tag ...] [--term ...]
+    python3 knowledge_graph.py query   --vault ... [--type ...] [--tag ...] [--term ...] [--run ...]
+    python3 knowledge_graph.py context --vault ... --repo ...   # prior knowledge, read-only
 
 All commands print a JSON result to stdout and never raise on a per-node problem —
 they collect errors so a partial vault write is still reported, keeping the feature
@@ -536,6 +537,117 @@ def query_nodes(vault_root, subfolder, node_type=None, tag=None, term=None,
     return results
 
 
+def _first_paragraph(body, limit=200):
+    """The note's opening prose — text before any managed region or heading,
+    first paragraph only, capped. Used to build the bounded context payload."""
+    cut = len(body)
+    for marker in (_IDX_OPEN, _OBS_OPEN, _LINKS_OPEN, "\n## "):
+        idx = body.find(marker)
+        if idx != -1:
+            cut = min(cut, idx)
+    head = body[:cut].strip()
+    return head.split("\n\n", 1)[0].replace("\n", " ").strip()[:limit]
+
+
+def build_context(vault_root, subfolder, repo, limit=10):
+    """Read-only prior-knowledge summary for a repo, consumed at run intake.
+
+    Returns a bounded, deterministic dict: the repo's ``system`` hub one-liner;
+    ALL ``patterns`` (they are cross-repo by design — the one thing per-repo run
+    artifacts cannot carry); ``domain`` notes and non-superseded ``decisions``
+    scoped to the repo, newest first, capped at ``limit``; and ``known_ids`` per
+    type so callers reuse existing ids instead of drifting into duplicates.
+    """
+    repo_slug = slugify(repo) if repo else ""
+
+    def scan(node_type):
+        reldir = _vault_reldir(subfolder, node_type)
+        absdir = resolve_within(vault_root, reldir)
+        if not absdir or not os.path.isdir(absdir):
+            return []
+        out = []
+        for name in sorted(os.listdir(absdir)):
+            if not name.endswith(".md"):
+                continue
+            text = _read_note(os.path.join(absdir, name))
+            if text is None:
+                continue
+            fm, body = _parse_frontmatter(text)
+            out.append({"id": fm.get("id", name[:-3]),
+                        "title": fm.get("title", name[:-3]),
+                        "repo": fm.get("repo", ""),
+                        "status": fm.get("status", ""),
+                        "updated": fm.get("updated", ""),
+                        "runs": len(_as_list(fm.get("runs"))),
+                        "one_liner": _first_paragraph(body)})
+        return out
+
+    def newest(entries):
+        entries = sorted(entries, key=lambda e: e["id"])
+        entries.sort(key=lambda e: e["updated"], reverse=True)
+        return entries[:limit]
+
+    def public(entry, extra=()):
+        keys = ("id", "title", "one_liner", "runs", "updated") + tuple(extra)
+        return {k: entry[k] for k in keys}
+
+    scans = {nt: scan(nt) for nt in ("system", "component", "pattern",
+                                     "domain", "decision")}
+    for_repo = lambda entries: [e for e in entries  # noqa: E731
+                                if not repo_slug or e["repo"] == repo_slug]
+    system = next((e for e in scans["system"] if e["id"] == repo_slug), None)
+    decisions = [e for e in for_repo(scans["decision"])
+                 if e["status"] != "superseded"]
+    return {
+        "repo": repo_slug,
+        "system": system["one_liner"] if system else None,
+        "patterns": [public(e) for e in newest(scans["pattern"])],
+        "domain": [public(e) for e in newest(for_repo(scans["domain"]))],
+        "decisions": [public(e, extra=("status",)) for e in newest(decisions)],
+        "known_ids": {nt: sorted(e["id"] for e in scans[nt])
+                      for nt in ("system", "component", "pattern", "domain")},
+    }
+
+
+# Node types whose ids must stay stable across runs for accumulation to work —
+# the only ones eligible for the conservative id-drift remap below.
+_REMAP_TYPES = ("pattern", "component", "system", "domain")
+
+
+def _find_canonical_id(vault_root, subfolder, node):
+    """Conservative id-drift backstop for reference-before-create.
+
+    When a node's exact id has no existing note, look for the ONE existing note
+    in the same type dir it plainly meant: same id modulo a ``-<type>`` suffix on
+    either side, or a slugified-title match. Zero or multiple candidates →
+    ``None`` (create as given — never guess a merge).
+    """
+    node_type = node["type"]
+    node_id = slugify(node["id"])
+    title_slug = slugify(node["title"]) if node.get("title") else ""
+    try:
+        existing = query_nodes(vault_root, subfolder, node_type=node_type)
+    except (ValueError, OSError):
+        return None
+
+    suffix = f"-{node_type}"
+
+    def strip_suffix(s):
+        return s[:-len(suffix)] if s.endswith(suffix) else s
+
+    candidates = set()
+    for entry in existing:
+        eid = entry["id"]
+        if eid == node_id:
+            return None  # exact note exists after all — nothing to remap
+        match = strip_suffix(eid) == strip_suffix(node_id)
+        if not match and title_slug:
+            match = title_slug in (eid, slugify(entry.get("title") or ""))
+        if match:
+            candidates.add(eid)
+    return candidates.pop() if len(candidates) == 1 else None
+
+
 def _collect_run_refs(vault_root, subfolder, run_id):
     """Every non-run node in the vault touched by ``run_id``, as MOC refs.
 
@@ -571,9 +683,33 @@ def _run_batch(payload):
     run_id = payload["run_id"]
     date = payload["date"]
     default_repo = payload.get("repo", "")
+    nodes = [dict(n) for n in payload.get("nodes", [])]
+    # Id-drift backstop: remap a new pattern/component/system/domain id onto the
+    # one existing note it plainly meant, and rewrite same-payload links to it.
+    id_map, remapped = {}, []
+    for node in nodes:
+        if node.get("type") in _REMAP_TYPES and node.get("id"):
+            node_id = slugify(node["id"])
+            try:
+                abspath = resolve_within(
+                    vault, note_relpath(subfolder, node["type"], node_id))
+            except ValueError:
+                continue
+            if abspath is None or os.path.exists(abspath):
+                continue
+            canonical = _find_canonical_id(vault, subfolder, node)
+            if canonical and canonical != node_id:
+                id_map[node_id] = canonical
+                remapped.append({"from": node_id, "to": canonical})
+                node["id"] = canonical
+    if id_map:
+        for node in nodes:
+            if node.get("links"):
+                node["links"] = [id_map.get(slugify(l), l) for l in node["links"]]
+
     results, errors, refs = [], [], []
     redactions = 0
-    for node in payload.get("nodes", []):
+    for node in nodes:
         node.setdefault("repo", default_repo)
         try:
             res = upsert_node(vault, subfolder, node, run_id, date)
@@ -598,7 +734,8 @@ def _run_batch(payload):
             errors.append({"node": f"run:{run_id}", "error": str(exc)})
     return {"upserted": len(results), "created": sum(1 for r in results if r["created"]),
             "updated": sum(1 for r in results if not r["created"]),
-            "redactions": redactions, "nodes": results, "errors": errors}
+            "redactions": redactions, "remapped": remapped,
+            "nodes": results, "errors": errors}
 
 
 def main(argv=None):
@@ -631,6 +768,13 @@ def main(argv=None):
     p_q.add_argument("--term")
     p_q.add_argument("--run", help="only nodes whose frontmatter runs include this run-id")
 
+    p_c = sub.add_parser("context",
+                         help="prior-knowledge summary for a repo (read-only)")
+    p_c.add_argument("--vault", required=True)
+    p_c.add_argument("--subfolder", default="spec-loop")
+    p_c.add_argument("--repo", required=True)
+    p_c.add_argument("--limit", type=int, default=10)
+
     args = parser.parse_args(argv)
     try:
         if args.cmd == "batch":
@@ -643,10 +787,13 @@ def main(argv=None):
                     "status": args.status, "reversibility": args.reversibility}
             res = upsert_node(args.vault, args.subfolder, node, args.run, args.date)
             result = {"created": res["created"], "path": res["path"]}
-        else:  # query
+        elif args.cmd == "query":
             result = {"nodes": query_nodes(args.vault, args.subfolder,
                                            args.type, args.tag, args.term,
                                            run_id=args.run)}
+        else:  # context
+            result = build_context(args.vault, args.subfolder, args.repo,
+                                   args.limit)
     except (ValueError, OSError, json.JSONDecodeError) as exc:
         print(json.dumps({"error": str(exc)}))
         return 1

@@ -433,5 +433,116 @@ class TestQueryAndBatch(TempVault):
         self.assertEqual(len(result["errors"]), 1)
 
 
+# --------------------------------------------------------------------------
+# Context — the read path consumed at run intake
+# --------------------------------------------------------------------------
+
+class TestBuildContext(TempVault):
+    def seed(self):
+        self.upsert({"type": "system", "id": "repo-a", "title": "Repo A",
+                     "summary": "Service A owns deposits."},
+                    run_id="run-1", date="2026-07-01")
+        self.upsert({"type": "pattern", "id": "outbox", "title": "Outbox",
+                     "summary": "Transactional outbox.", "repo": "repo-b"},
+                    run_id="run-0", date="2026-06-01")
+        self.upsert({"type": "domain", "id": "repo-a-deposits", "repo": "repo-a",
+                     "title": "Deposit rules", "summary": "Deposits spread evenly."},
+                    run_id="run-1", date="2026-07-01")
+        self.upsert({"type": "decision", "id": "d-active", "repo": "repo-a",
+                     "title": "Active", "status": "active"},
+                    run_id="run-1", date="2026-07-01")
+        self.upsert({"type": "decision", "id": "d-old", "repo": "repo-a",
+                     "title": "Old", "status": "superseded"},
+                    run_id="run-1", date="2026-07-01")
+        self.upsert({"type": "decision", "id": "d-other", "repo": "repo-b",
+                     "title": "Other"},
+                    run_id="run-1", date="2026-07-01")
+
+    def test_context_scopes_and_filters(self):
+        self.seed()
+        ctx = kg.build_context(self.vault, self.subfolder, "repo-a")
+        self.assertEqual(ctx["system"], "Service A owns deposits.")
+        # Patterns are cross-repo — repo-b's pattern still surfaces for repo-a.
+        self.assertEqual([p["id"] for p in ctx["patterns"]], ["outbox"])
+        self.assertEqual([d["id"] for d in ctx["domain"]], ["repo-a-deposits"])
+        # Superseded and other-repo decisions excluded.
+        self.assertEqual([d["id"] for d in ctx["decisions"]], ["d-active"])
+        self.assertEqual(ctx["known_ids"]["pattern"], ["outbox"])
+        self.assertEqual(ctx["known_ids"]["system"], ["repo-a"])
+
+    def test_context_on_empty_vault_is_well_formed(self):
+        ctx = kg.build_context(self.vault, self.subfolder, "repo-a")
+        self.assertIsNone(ctx["system"])
+        self.assertEqual(ctx["patterns"], [])
+        self.assertEqual(ctx["decisions"], [])
+        self.assertEqual(ctx["known_ids"]["pattern"], [])
+
+    def test_context_caps_and_orders_newest_first(self):
+        for i in range(5):
+            self.upsert({"type": "decision", "id": f"d{i}", "repo": "repo-a",
+                         "title": f"D{i}"},
+                        run_id=f"run-{i}", date=f"2026-07-0{i + 1}")
+        ctx = kg.build_context(self.vault, self.subfolder, "repo-a", limit=3)
+        self.assertEqual([d["id"] for d in ctx["decisions"]], ["d4", "d3", "d2"])
+
+
+# --------------------------------------------------------------------------
+# Id-drift remap — mechanical reference-before-create
+# --------------------------------------------------------------------------
+
+class TestIdRemap(TempVault):
+    def test_suffixed_id_remaps_to_existing_note(self):
+        self.upsert({"type": "pattern", "id": "outbox", "title": "Outbox",
+                     "summary": "Transactional outbox."},
+                    run_id="run-1", date="2026-07-01")
+        result = kg._run_batch({
+            "vault": self.vault, "subfolder": self.subfolder,
+            "run_id": "run-2", "date": "2026-07-06", "repo": "jobs",
+            "nodes": [
+                {"type": "pattern", "id": "outbox-pattern", "title": "Outbox",
+                 "observation": "Reused for deposits."},
+                {"type": "decision", "id": "d1", "title": "D1",
+                 "links": ["outbox-pattern"]},
+            ],
+        })
+        self.assertEqual(result["remapped"], [{"from": "outbox-pattern",
+                                               "to": "outbox"}])
+        patterns = Path(self.vault, self.subfolder, "Patterns")
+        self.assertEqual(sorted(p.name for p in patterns.glob("*.md")),
+                         ["outbox.md"])
+        self.assertIn("Reused for deposits.", self.read("pattern", "outbox"))
+        # The same-payload link was rewritten to the canonical id.
+        self.assertIn("[[outbox]]", self.read("decision", "d1"))
+
+    def test_new_pattern_is_not_remapped(self):
+        self.upsert({"type": "pattern", "id": "outbox", "title": "Outbox"},
+                    run_id="run-1", date="2026-07-01")
+        result = kg._run_batch({
+            "vault": self.vault, "subfolder": self.subfolder,
+            "run_id": "run-2", "date": "2026-07-06", "repo": "jobs",
+            "nodes": [{"type": "pattern", "id": "saga", "title": "Saga"}],
+        })
+        self.assertEqual(result["remapped"], [])
+        self.assertTrue(Path(self.vault, self.subfolder, "Patterns",
+                             "saga.md").exists())
+
+    def test_ambiguous_match_is_not_remapped(self):
+        # Two plausible canonical targets → never guess.
+        self.upsert({"type": "pattern", "id": "outbox", "title": "Event relay"},
+                    run_id="run-1", date="2026-07-01")
+        self.upsert({"type": "pattern", "id": "outbox-pattern-v2",
+                     "title": "Outbox"},
+                    run_id="run-1", date="2026-07-01")
+        result = kg._run_batch({
+            "vault": self.vault, "subfolder": self.subfolder,
+            "run_id": "run-2", "date": "2026-07-06", "repo": "jobs",
+            "nodes": [{"type": "pattern", "id": "outbox-pattern",
+                       "title": "Outbox"}],
+        })
+        self.assertEqual(result["remapped"], [])
+        self.assertTrue(Path(self.vault, self.subfolder, "Patterns",
+                             "outbox-pattern.md").exists())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
