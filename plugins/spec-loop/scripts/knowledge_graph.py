@@ -78,7 +78,7 @@ _IDX_OPEN, _IDX_CLOSE = "<!-- kg:index -->", "<!-- /kg:index -->"
 _V1_MOC_SENTINEL = "Knowledge-graph index for spec-loop run"
 
 # Canonical frontmatter key order for stable, diff-friendly output.
-_FM_ORDER = ["type", "id", "title", "tags", "repo", "runs",
+_FM_ORDER = ["type", "id", "title", "aliases", "tags", "repo", "runs",
              "created", "updated", "status", "reversibility", "verdict"]
 
 
@@ -171,7 +171,9 @@ def redact_secrets(text):
 # Minimal frontmatter reader / writer (only the fixed schema this module emits)
 # --------------------------------------------------------------------------
 
-_NEEDS_QUOTE = re.compile(r'^\s|\s$|[:#\[\]{}"\']|^$')
+# Comma is quoted so scalars with commas survive the inline-list round-trip
+# (aliases carry human titles, which may contain commas).
+_NEEDS_QUOTE = re.compile(r'^\s|\s$|[:#\[\]{}"\',]|^$')
 
 
 def _quote_scalar(value):
@@ -426,6 +428,13 @@ def upsert_node(vault_root, subfolder, node, run_id, date):
     })
     if repo:
         fm["repo"] = repo
+    # Alias the human title so [[wikilinks]] by id and the quick switcher both
+    # resolve/display it; union preserves user-added aliases, and a title that
+    # merely re-slugs to the id adds nothing.
+    aliases = _dedup(_as_list(fm.get("aliases"))
+                     + ([fm["title"]] if slugify(fm["title"]) != node_id else []))
+    if aliases:
+        fm["aliases"] = aliases
     if node.get("status"):
         fm["status"] = node["status"]
     if node.get("reversibility"):
@@ -538,6 +547,10 @@ def query_nodes(vault_root, subfolder, node_type=None, tag=None, term=None,
                 "title": fm.get("title", name[:-3]),
                 "type": fm.get("type", nt),
                 "tags": tags,
+                "repo": fm.get("repo", ""),
+                "status": fm.get("status", ""),
+                "created": fm.get("created", ""),
+                "updated": fm.get("updated", ""),
                 "one_liner": _first_paragraph(body),
             })
     return results
@@ -734,6 +747,130 @@ def build_context(vault_root, subfolder, repo, limit=10, terms=None,
     return result
 
 
+# --------------------------------------------------------------------------
+# Obsidian-native UX — starter Bases view + per-repo home index
+# --------------------------------------------------------------------------
+
+_BASE_FILENAME = "spec-loop.base"
+
+# A starter Obsidian Bases file (core since ~1.9): table views over the notes
+# this module writes. Tag-filtered (not folder-filtered) so it works when
+# `subfolder` is "" and survives the user moving the file. Create-once: the
+# user owns it after first write.
+_BASE_CONTENT = """\
+filters:
+  and:
+    - file.hasTag("spec-loop")
+views:
+  - type: table
+    name: Runs
+    filters:
+      and:
+        - 'note.type == "run"'
+    order: [file.name, note.title, note.repo, note.created]
+    sort:
+      - property: note.created
+        direction: DESC
+  - type: table
+    name: Decisions
+    filters:
+      and:
+        - 'note.type == "decision"'
+    order: [file.name, note.title, note.repo, note.status, note.reversibility, note.updated]
+    sort:
+      - property: note.updated
+        direction: DESC
+  - type: table
+    name: Patterns
+    filters:
+      and:
+        - 'note.type == "pattern"'
+    order: [file.name, note.title, note.repo, note.runs, note.updated]
+    sort:
+      - property: note.updated
+        direction: DESC
+  - type: table
+    name: Domain
+    filters:
+      and:
+        - 'note.type == "domain"'
+    order: [file.name, note.title, note.repo, note.updated]
+    sort:
+      - property: note.updated
+        direction: DESC
+  - type: table
+    name: Reviews
+    filters:
+      and:
+        - 'note.type == "review"'
+    order: [file.name, note.title, note.repo, note.verdict, note.updated]
+    sort:
+      - property: note.updated
+        direction: DESC
+"""
+
+
+def write_base_file(vault_root, subfolder):
+    """Create the starter ``spec-loop.base`` once; never touch an existing one.
+
+    Bases files have no managed-region mechanism, so create-once-if-absent is
+    the only way to honor "never clobber human edits". Returns
+    ``{path, created}``; raises ``ValueError`` on an unsafe target.
+    """
+    rel = os.path.join(subfolder, _BASE_FILENAME) if subfolder else _BASE_FILENAME
+    abspath = resolve_within(vault_root, rel)
+    if abspath is None:
+        raise ValueError(f"unsafe base path: {rel!r}")
+    if os.path.exists(abspath):
+        return {"path": abspath, "created": False}
+    os.makedirs(os.path.dirname(abspath), exist_ok=True)
+    with open(abspath, "w", encoding="utf-8") as fh:
+        fh.write(_BASE_CONTENT)
+    return {"path": abspath, "created": True}
+
+
+def render_repo_index(vault_root, subfolder, repo, limit=15):
+    """Render the per-repo home index for the ``System/<repo>`` hub's managed
+    ``kg:index`` region — the entry point a human opens.
+
+    Deterministic snapshot: runs newest-first (by ``created``, cap ``limit``),
+    active (non-superseded) decisions, patterns (cross-repo by design), domain
+    and reviews for this repo. Empty sections are omitted. Returns ``""`` when
+    there is nothing to list.
+    """
+    repo_slug = slugify(repo) if repo else ""
+
+    def rows(node_type, repo_scoped=True, skip_superseded=False, cap=10,
+             by="updated"):
+        try:
+            found = query_nodes(vault_root, subfolder, node_type=node_type)
+        except (ValueError, OSError):
+            return []
+        if repo_scoped and repo_slug:
+            found = [n for n in found if n["repo"] == repo_slug]
+        if skip_superseded:
+            found = [n for n in found if n["status"] != "superseded"]
+        found.sort(key=lambda n: n["id"])
+        found.sort(key=lambda n: n[by], reverse=True)
+        return [f"- [[{n['id']}|{n['title']}]]" for n in found[:cap]]
+
+    sections = [
+        ("Runs", rows("run", cap=limit, by="created")),
+        ("Active decisions", rows("decision", skip_superseded=True)),
+        ("Patterns", rows("pattern", repo_scoped=False)),
+        ("Domain", rows("domain")),
+        ("Reviews", rows("review", cap=5)),
+    ]
+    lines = []
+    for heading, items in sections:
+        if not items:
+            continue
+        lines.extend([f"## {heading}", ""])
+        lines.extend(items)
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
 # Node types whose ids must stay stable across runs for accumulation to work —
 # the only ones eligible for the conservative id-drift remap below.
 _REMAP_TYPES = ("pattern", "component", "system", "domain")
@@ -857,10 +994,31 @@ def _run_batch(payload):
                           moc_refs)
         except (ValueError, OSError) as exc:
             errors.append({"node": f"run:{run_id}", "error": str(exc)})
-    return {"upserted": len(results), "created": sum(1 for r in results if r["created"]),
-            "updated": sum(1 for r in results if not r["created"]),
-            "redactions": redactions, "remapped": remapped,
-            "nodes": results, "errors": errors}
+        # Refresh the repo hub's home index at the same two moments the MOC is
+        # built (controller Phase 1, runbook Phase 5) — after the MOC write so
+        # the run itself is listed. Bookkeeping, not a counted upsert.
+        if default_repo:
+            try:
+                index = render_repo_index(vault, subfolder, default_repo)
+                if index:
+                    upsert_node(vault, subfolder,
+                                {"type": "system", "id": default_repo,
+                                 "repo": default_repo, "index": index},
+                                run_id, date)
+            except (ValueError, OSError) as exc:
+                errors.append({"node": f"system:{default_repo}",
+                               "error": str(exc)})
+    result = {"upserted": len(results),
+              "created": sum(1 for r in results if r["created"]),
+              "updated": sum(1 for r in results if not r["created"]),
+              "redactions": redactions, "remapped": remapped,
+              "nodes": results, "errors": errors}
+    if payload.get("ensure_base"):
+        try:
+            result["base"] = {"created": write_base_file(vault, subfolder)["created"]}
+        except (ValueError, OSError) as exc:
+            errors.append({"node": "base", "error": str(exc)})
+    return result
 
 
 def main(argv=None):

@@ -867,5 +867,192 @@ class TestReviewNodes(TempVault):
         self.assertNotIn("abcdefgh12345678", self.read("review", self.REVIEW_ID))
 
 
+# --------------------------------------------------------------------------
+# Aliases — wikilinks and quick-switcher resolve by human title
+# --------------------------------------------------------------------------
+
+class TestAliases(TempVault):
+    def test_alias_added_when_title_differs_from_slug(self):
+        self.upsert({"type": "decision", "id": "d-bus", "repo": "jobs",
+                     "title": "Use the event bus"},
+                    run_id="run-1", date="2026-07-01")
+        text = self.read("decision", "d-bus")
+        self.assertIn("aliases: [Use the event bus]", text)
+
+    def test_alias_omitted_when_title_reslug_matches_id(self):
+        self.upsert({"type": "pattern", "id": "outbox", "title": "Outbox"},
+                    run_id="run-1", date="2026-07-01")
+        self.assertNotIn("aliases:", self.read("pattern", "outbox"))
+
+    def test_alias_union_preserves_user_alias(self):
+        rel = kg.note_relpath(self.subfolder, "decision", "d-user")
+        path = Path(self.vault, rel)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "---\ntype: decision\nid: d-user\ntitle: My decision\n"
+            "aliases: [my nickname]\ntags: [spec-loop, decision]\n"
+            "runs: [run-1]\ncreated: 2026-07-01\nupdated: 2026-07-01\n---\n"
+            "Prose.\n", encoding="utf-8")
+        self.upsert({"type": "decision", "id": "d-user",
+                     "title": "My decision"},
+                    run_id="run-2", date="2026-07-06")
+        text = self.read("decision", "d-user")
+        self.assertIn("my nickname", text)
+        self.assertIn("My decision", text.split("---")[1])
+
+    def test_alias_not_duplicated_across_runs(self):
+        node = {"type": "decision", "id": "d-dup", "repo": "jobs",
+                "title": "Use the event bus"}
+        self.upsert(node, run_id="run-1", date="2026-07-01")
+        self.upsert(node, run_id="run-2", date="2026-07-06")
+        fm, _body = kg._parse_frontmatter(self.read("decision", "d-dup"))
+        self.assertEqual(fm["aliases"], ["Use the event bus"])
+
+    def test_comma_title_alias_roundtrips(self):
+        self.upsert({"type": "decision", "id": "d-comma", "repo": "jobs",
+                     "title": "Retry, then fail"},
+                    run_id="run-1", date="2026-07-01")
+        fm, _body = kg._parse_frontmatter(self.read("decision", "d-comma"))
+        self.assertEqual(fm["aliases"], ["Retry, then fail"])
+
+
+# --------------------------------------------------------------------------
+# Typed frontmatter — regression pin for Obsidian Bases compatibility
+# --------------------------------------------------------------------------
+
+class TestTypedFrontmatter(TempVault):
+    def test_dates_unquoted_and_lists_inline(self):
+        self.upsert({"type": "decision", "id": "d1", "repo": "jobs",
+                     "title": "D1"}, run_id="run-1", date="2026-07-01")
+        text = self.read("decision", "d1")
+        self.assertIn("created: 2026-07-01\n", text)   # unquoted ISO date
+        self.assertIn("updated: 2026-07-01\n", text)
+        self.assertIn("tags: [spec-loop, decision, jobs]\n", text)
+        self.assertIn("runs: [run-1]\n", text)
+
+
+# --------------------------------------------------------------------------
+# Starter .base — create-once Obsidian Bases table views
+# --------------------------------------------------------------------------
+
+class TestBaseFile(TempVault):
+    def test_base_created_when_absent(self):
+        res = kg.write_base_file(self.vault, self.subfolder)
+        self.assertTrue(res["created"])
+        text = Path(res["path"]).read_text(encoding="utf-8")
+        self.assertIn('file.hasTag("spec-loop")', text)
+        for view in ("Runs", "Decisions", "Patterns", "Domain", "Reviews"):
+            self.assertIn(f"name: {view}", text)
+
+    def test_base_existing_left_byte_identical(self):
+        target = Path(self.vault, self.subfolder, "spec-loop.base")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# user-customized base\n", encoding="utf-8")
+        res = kg.write_base_file(self.vault, self.subfolder)
+        self.assertFalse(res["created"])
+        self.assertEqual(target.read_text(encoding="utf-8"),
+                         "# user-customized base\n")
+
+    def test_batch_ensure_base_reports_created(self):
+        result = kg._run_batch({
+            "vault": self.vault, "subfolder": self.subfolder,
+            "run_id": "run-1", "date": "2026-07-01", "repo": "jobs",
+            "nodes": [{"type": "system", "id": "jobs", "title": "Jobs"}],
+            "ensure_base": True,
+        })
+        self.assertEqual(result["base"], {"created": True})
+        result = kg._run_batch({
+            "vault": self.vault, "subfolder": self.subfolder,
+            "run_id": "run-1", "date": "2026-07-01", "repo": "jobs",
+            "nodes": [], "ensure_base": True,
+        })
+        self.assertEqual(result["base"], {"created": False})
+
+    def test_base_path_contained(self):
+        with self.assertRaises(ValueError):
+            kg.write_base_file(self.vault, "../outside")
+
+
+# --------------------------------------------------------------------------
+# Per-repo home index — the System hub's managed kg:index region
+# --------------------------------------------------------------------------
+
+class TestRepoIndex(TempVault):
+    def seed_and_moc(self):
+        return kg._run_batch({
+            "vault": self.vault, "subfolder": self.subfolder,
+            "run_id": "run-1", "date": "2026-07-06", "repo": "jobs",
+            "nodes": [
+                {"type": "system", "id": "jobs", "title": "Jobs service",
+                 "summary": "The jobs service."},
+                {"type": "decision", "id": "d-live", "title": "Live decision"},
+                {"type": "decision", "id": "d-old", "title": "Old decision",
+                 "status": "superseded"},
+                {"type": "pattern", "id": "outbox", "title": "Outbox"},
+            ],
+            "moc": {"request_title": "Add deposits"},
+        })
+
+    def test_hub_index_rebuilt_on_moc_batch(self):
+        result = self.seed_and_moc()
+        self.assertEqual(result["errors"], [])
+        text = self.read("system", "jobs")
+        self.assertIn("<!-- kg:index -->", text)
+        self.assertIn("## Runs", text)
+        self.assertIn("[[run-1|", text)
+        self.assertIn("## Active decisions", text)
+        self.assertIn("[[d-live|Live decision]]", text)
+        self.assertNotIn("[[d-old|", text)          # superseded excluded
+        self.assertIn("[[outbox|Outbox]]", text)
+
+    def test_hub_prose_untouched_by_index(self):
+        self.seed_and_moc()
+        text = self.read("system", "jobs")
+        self.assertIn("The jobs service.", text)
+        # Prose comes before the managed index region.
+        self.assertLess(text.find("The jobs service."),
+                        text.find("<!-- kg:index -->"))
+
+    def test_hub_index_scoped_to_repo(self):
+        self.seed_and_moc()
+        kg._run_batch({
+            "vault": self.vault, "subfolder": self.subfolder,
+            "run_id": "run-x", "date": "2026-07-07", "repo": "other",
+            "nodes": [
+                {"type": "system", "id": "other", "title": "Other"},
+                {"type": "decision", "id": "d-foreign", "title": "Foreign"},
+            ],
+            "moc": True,
+        })
+        text = self.read("system", "jobs")
+        self.assertNotIn("[[d-foreign|", text)
+        self.assertNotIn("[[run-x|", text)
+
+    def test_moc_batch_retry_with_base_byte_identical(self):
+        def snapshot():
+            files = {}
+            for root, _dirs, names in os.walk(self.vault):
+                for name in sorted(names):
+                    p = Path(root, name)
+                    files[str(p.relative_to(self.vault))] = p.read_bytes()
+            return files
+        payload = {
+            "vault": self.vault, "subfolder": self.subfolder,
+            "run_id": "run-1", "date": "2026-07-06", "repo": "jobs",
+            "nodes": [
+                {"type": "system", "id": "jobs", "title": "Jobs",
+                 "summary": "The jobs service."},
+                {"type": "decision", "id": "d1", "title": "D1",
+                 "links": ["jobs"]},
+            ],
+            "moc": {"request_title": "Add deposits"},
+            "ensure_base": True,
+        }
+        kg._run_batch(payload)
+        first = snapshot()
+        kg._run_batch(payload)
+        self.assertEqual(first, snapshot())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
