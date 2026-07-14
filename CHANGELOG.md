@@ -23,6 +23,19 @@ prior build. Pinned entries map to git tags `v<version>`.
 
 ## [Unreleased]
 ### Added
+- **`/spec-loop --from-plan [path]` — plan-mode handoff.** The loop can now source its
+  intent from a Claude Code plan-mode plan instead of a free-text request. With no
+  path it reads the most recently modified `*.md` under `~/.claude/plans/` (the
+  directory plan mode writes approved plans to); with a path it reads that file. The
+  controller treats the plan as authoritative intent — restating its goal, seeding
+  decomposition from its structure, and recording it into
+  `docs/spec-loop/<run-id>/request.md` — while any prose passed alongside the flag
+  layers on as extra focus. `--resume` still wins if both are given; a bare
+  `--from-plan` against an empty plans dir stops with a clear message rather than
+  treating the flag as the request. This is the supported bridge from plan mode into
+  the loop: Claude Code's plan-approval menu cannot be extended with a custom "run via
+  spec-loop" item (those options are hardcoded in the harness), so the flag + the
+  on-disk plan file are the handoff.
 - **Knowledge-graph Obsidian-native UX.** Notes gain an `aliases` frontmatter entry (the
   human title, unioned with user-added aliases) so wikilinks and the quick switcher
   resolve by title; commas are now quoted in frontmatter scalars so titles survive the

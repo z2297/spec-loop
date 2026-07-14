@@ -130,6 +130,14 @@ Flags:
 - `--per-slice-pr` — opt into a branch/PR **per slice** instead of the default
   single-branch merge (also triggered by explicitly asking for it in the request).
 - `--resume <run-id>` — continue a previous run.
+- `--from-plan [path]` — source the run's intent from a **Claude Code plan-mode
+  plan** instead of a free-text request. With no path, reads the most recently
+  modified `*.md` in `~/.claude/plans/` (the directory plan mode writes to); with a
+  path, reads that file. This is the bridge from plan mode into the loop: approve a
+  plan, then run `/spec-loop --from-plan`. Any prose you pass alongside the flag is
+  layered on as extra focus (e.g. `--from-plan "defer the migration step"`). Since
+  the plan-mode approval menu can't be extended with a custom "run via spec-loop"
+  item, this flag is the supported handoff.
 
 **Branch model.** By default all slices merge into **one** dedicated local
 integration branch (cut from `main`), and the run ends by asking whether to push it
@@ -201,6 +209,25 @@ What happens:
 - Interrupted? `--resume <run-id>` skips completed slices and continues. Illustrates the
   full machinery: flags, tiered review, the council's hard stop, batched escalation, and
   resume.
+
+### Plan-mode handoff — approve a plan, then let the loop build it
+
+```
+# In Claude Code plan mode: brainstorm + approve a plan (written to ~/.claude/plans/<slug>.md)
+/spec-loop --from-plan
+```
+
+What happens:
+- Plan mode's approval menu can't be extended with a custom "run via spec-loop"
+  item — those options are hardcoded in the harness. But every approved plan is
+  **written to disk** at `~/.claude/plans/<slug>.md`, so `--from-plan` picks up the
+  **most recent** one (or a path you name) and uses it as the run's intent.
+- The controller restates the plan's goal, lets its Context / Approach / files /
+  verification sections **seed** decomposition (a plan that already lists phases maps
+  naturally onto slices), and writes the plan into `docs/spec-loop/<run-id>/request.md`
+  for a self-contained run. The Iron Council still vets it at intake like any request.
+- Add focus alongside the flag if you want — `/spec-loop --from-plan "skip the
+  migration step for now"` layers that constraint on top of the plan.
 
 ### Large — a coarse request that splits itself, then an integration gate
 
