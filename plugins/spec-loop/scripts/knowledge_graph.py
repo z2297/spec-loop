@@ -478,13 +478,16 @@ def _dedup(items):
     return out
 
 
-def build_run_moc(vault_root, subfolder, run_id, date, request_title, repo, node_refs):
+def build_run_moc(vault_root, subfolder, run_id, date, request_title, repo, node_refs,
+                  extra_links=None):
     """Write/refresh the ``Runs/<run-id>.md`` MOC linking every node the run touched.
 
     ``node_refs`` is a list of ``{type, id, title}``. The MOC groups links by type
     inside the managed ``kg:index`` region, which is replaced wholesale on every
     call — so a re-run of the same run-id genuinely refreshes the listing (and a
     pre-region stale body is upgraded in place by ``_replace_index``).
+    ``extra_links`` are appended verbatim (not slugified) — used for the run's
+    ``.canvas`` companion, whose filename must keep its extension.
     """
     by_type = {}
     for ref in node_refs:
@@ -508,7 +511,7 @@ def build_run_moc(vault_root, subfolder, run_id, date, request_title, repo, node
         "summary": f"{_V1_MOC_SENTINEL} `{run_id}`"
                    + (f" — {request_title}" if request_title else "") + ".",
         "index": "\n".join(lines).strip(),
-        "links": [slugify(r["id"]) for r in node_refs],
+        "links": [slugify(r["id"]) for r in node_refs] + list(extra_links or []),
     }
     return upsert_node(vault_root, subfolder, node, run_id, date)
 
@@ -871,6 +874,98 @@ def render_repo_index(vault_root, subfolder, repo, limit=15):
     return "\n".join(lines).strip()
 
 
+# JSON Canvas 1.0 (jsoncanvas.org) preset colors by risk tier: 1 → green,
+# 2 → yellow, 3 → red; anything else → purple (visibly "unknown").
+_TIER_COLORS = {1: "4", 2: "3", 3: "1"}
+
+
+def layer_slices(slices):
+    """Longest-path wave layering over a dag's ``slices`` → ``{id: wave}``.
+
+    Mirrors the controller's wave semantics: a slice's wave is one past its
+    deepest dependency. Split parents (``status: "split"``) are excluded —
+    their children carry the real edges — and a dep pointing at an excluded or
+    unknown id is dropped defensively rather than failing the render.
+    """
+    active = {s["id"]: s for s in slices
+              if s.get("id") and s.get("status") != "split"}
+    waves = {}
+
+    def wave(sid, stack=()):
+        if sid in waves:
+            return waves[sid]
+        if sid in stack:  # cycle guard — never recurse forever on a bad dag
+            return 0
+        deps = [d for d in (active[sid].get("deps") or []) if d in active]
+        w = 0 if not deps else max(wave(d, stack + (sid,)) for d in deps) + 1
+        waves[sid] = w
+        return w
+
+    for sid in sorted(active):
+        wave(sid)
+    return waves
+
+
+def build_run_canvas(vault_root, subfolder, run_id, dag):
+    """Write ``Runs/<run-id>.canvas`` — a JSON Canvas 1.0 view of the run DAG.
+
+    Deterministic layout: wave columns (``x = wave * 460``), rows sorted by
+    slice id, one labeled group per wave, text nodes colored by risk tier,
+    dep edges flowing left→right. **Create-once-if-absent**: canvas JSON has
+    no managed-region mechanism, so an existing file (the user may have
+    rearranged it) is never touched. Returns ``{path, created}``.
+    """
+    rel = os.path.join(_vault_reldir(subfolder, "run"),
+                       f"{slugify(run_id)}.canvas")
+    abspath = resolve_within(vault_root, rel)
+    if abspath is None:
+        raise ValueError(f"unsafe canvas path: {rel!r}")
+    if os.path.exists(abspath):
+        return {"path": abspath, "created": False}
+
+    slices = [s for s in (dag.get("slices") or [])
+              if s.get("id") and s.get("status") != "split"]
+    if not slices:
+        raise ValueError("dag has no renderable slices")
+    waves = layer_slices(dag.get("slices") or [])
+
+    by_wave = {}
+    for s in sorted(slices, key=lambda s: s["id"]):
+        by_wave.setdefault(waves.get(s["id"], 0), []).append(s)
+
+    nodes, edges = [], []
+    for w, members in sorted(by_wave.items()):
+        x = w * 460
+        for row, s in enumerate(members):
+            goal, _n = redact_secrets(str(s.get("goal") or ""))
+            goal = goal.replace("\n", " ").strip()[:200]
+            tier = s.get("risk_tier")
+            status = s.get("status") or "pending"
+            text = f"**{s['id']}**" + (f" — {goal}" if goal else "")
+            text += f"\n\ntier {tier} · {status}" if tier else f"\n\n{status}"
+            nodes.append({"id": f"s-{s['id']}", "type": "text",
+                          "x": x, "y": row * 200, "width": 360, "height": 140,
+                          "color": _TIER_COLORS.get(tier, "5"), "text": text})
+        bottom = (len(members) - 1) * 200 + 140
+        nodes.append({"id": f"wave-{w}", "type": "group",
+                      "label": f"Wave {w}", "x": x - 20, "y": -40,
+                      "width": 400, "height": bottom + 80})
+
+    known = {f"s-{s['id']}" for s in slices}
+    for s in sorted(slices, key=lambda s: s["id"]):
+        for dep in sorted(s.get("deps") or []):
+            if f"s-{dep}" in known:
+                edges.append({"id": f"e-{dep}-{s['id']}",
+                              "fromNode": f"s-{dep}", "fromSide": "right",
+                              "toNode": f"s-{s['id']}", "toSide": "left"})
+
+    os.makedirs(os.path.dirname(abspath), exist_ok=True)
+    with open(abspath, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"edges": edges, "nodes": nodes},
+                            indent=2, sort_keys=True) + "\n")
+    return {"path": abspath, "created": True}
+
+
 # Node types whose ids must stay stable across runs for accumulation to work —
 # the only ones eligible for the conservative id-drift remap below.
 _REMAP_TYPES = ("pattern", "component", "system", "domain")
@@ -982,6 +1077,22 @@ def _run_batch(payload):
                          "title": node.get("title", node["id"])})
         except (ValueError, OSError) as exc:
             errors.append({"node": node.get("id"), "error": str(exc)})
+    # Canvas before the MOC so the MOC can link it. Create-once; a malformed or
+    # missing dag file is a collected error, never a raised one.
+    canvas_res, canvas_link = None, None
+    canvas = payload.get("canvas")
+    if canvas:
+        try:
+            dag_file = canvas.get("dag_file") if isinstance(canvas, dict) else None
+            if not dag_file:
+                raise ValueError("canvas requires a dag_file path")
+            with open(dag_file, "r", encoding="utf-8") as fh:
+                dag = json.loads(fh.read(MAX_FILE_BYTES))
+            res = build_run_canvas(vault, subfolder, run_id, dag)
+            canvas_res = {"created": res["created"]}
+            canvas_link = f"{slugify(run_id)}.canvas"
+        except (ValueError, OSError, json.JSONDecodeError) as exc:
+            errors.append({"node": "canvas", "error": str(exc)})
     moc = payload.get("moc")
     if moc:
         request_title = moc.get("request_title", "") if isinstance(moc, dict) else ""
@@ -991,7 +1102,7 @@ def _run_batch(payload):
         moc_refs = _collect_run_refs(vault, subfolder, run_id) or refs
         try:
             build_run_moc(vault, subfolder, run_id, date, request_title, default_repo,
-                          moc_refs)
+                          moc_refs, extra_links=[canvas_link] if canvas_link else None)
         except (ValueError, OSError) as exc:
             errors.append({"node": f"run:{run_id}", "error": str(exc)})
         # Refresh the repo hub's home index at the same two moments the MOC is
@@ -1018,6 +1129,8 @@ def _run_batch(payload):
             result["base"] = {"created": write_base_file(vault, subfolder)["created"]}
         except (ValueError, OSError) as exc:
             errors.append({"node": "base", "error": str(exc)})
+    if canvas_res is not None:
+        result["canvas"] = canvas_res
     return result
 
 

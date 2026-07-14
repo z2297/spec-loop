@@ -1054,5 +1054,127 @@ class TestRepoIndex(TempVault):
         self.assertEqual(first, snapshot())
 
 
+# --------------------------------------------------------------------------
+# Run-DAG canvas — JSON Canvas 1.0 projection of the run's slices/waves
+# --------------------------------------------------------------------------
+
+class TestCanvas(TempVault):
+    DAG = {
+        "slices": [
+            {"id": "a", "goal": "Seed the schema", "deps": [],
+             "risk_tier": 1, "status": "complete"},
+            {"id": "b", "goal": "API layer", "deps": ["a"],
+             "risk_tier": 2, "status": "complete"},
+            {"id": "c", "goal": "Worker", "deps": ["a"],
+             "risk_tier": 3, "status": "complete"},
+            {"id": "d", "goal": "Wire together", "deps": ["b", "c"],
+             "risk_tier": 2, "status": "complete"},
+        ]
+    }
+
+    def write_dag(self, dag=None):
+        path = Path(self.vault, "dag.json")
+        path.write_text(json.dumps(dag or self.DAG), encoding="utf-8")
+        return str(path)
+
+    def canvas_path(self):
+        return Path(self.vault, self.subfolder, "Runs", "run-1.canvas")
+
+    def batch(self, **overrides):
+        payload = {
+            "vault": self.vault, "subfolder": self.subfolder,
+            "run_id": "run-1", "date": "2026-07-06", "repo": "jobs",
+            "nodes": [{"type": "system", "id": "jobs", "title": "Jobs"}],
+            "moc": {"request_title": "Add deposits"},
+            "canvas": {"dag_file": self.write_dag()},
+        }
+        payload.update(overrides)
+        return kg._run_batch(payload)
+
+    def test_layer_slices_longest_path(self):
+        waves = kg.layer_slices(self.DAG["slices"])
+        self.assertEqual(waves, {"a": 0, "b": 1, "c": 1, "d": 2})
+
+    def test_layer_slices_excludes_split_parents(self):
+        slices = [
+            {"id": "p", "deps": [], "status": "split"},
+            {"id": "p1", "deps": [], "parent": "p", "status": "complete"},
+            {"id": "p2", "deps": ["p1"], "parent": "p", "status": "complete"},
+            # A dep on the split parent is dropped defensively.
+            {"id": "q", "deps": ["p"], "status": "complete"},
+        ]
+        waves = kg.layer_slices(slices)
+        self.assertNotIn("p", waves)
+        self.assertEqual(waves["p1"], 0)
+        self.assertEqual(waves["p2"], 1)
+        self.assertEqual(waves["q"], 0)  # its only dep was the split parent
+
+    def test_canvas_written_and_spec_valid(self):
+        result = self.batch()
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["canvas"], {"created": True})
+        data = json.loads(self.canvas_path().read_text(encoding="utf-8"))
+        self.assertIn("nodes", data)
+        self.assertIn("edges", data)
+        text_nodes = [n for n in data["nodes"] if n["type"] == "text"]
+        self.assertEqual(len(text_nodes), 4)
+        for node in data["nodes"]:
+            for key in ("id", "type", "x", "y", "width", "height"):
+                self.assertIn(key, node)
+        for edge in data["edges"]:
+            for key in ("id", "fromNode", "toNode"):
+                self.assertIn(key, edge)
+        # Edges mirror the dag deps.
+        pairs = {(e["fromNode"], e["toNode"]) for e in data["edges"]}
+        self.assertEqual(pairs, {("s-a", "s-b"), ("s-a", "s-c"),
+                                 ("s-b", "s-d"), ("s-c", "s-d")})
+        # Risk-tier colors: 1 green(4), 2 yellow(3), 3 red(1).
+        colors = {n["id"]: n["color"] for n in text_nodes}
+        self.assertEqual(colors["s-a"], "4")
+        self.assertEqual(colors["s-b"], "3")
+        self.assertEqual(colors["s-c"], "1")
+        # One group per wave.
+        groups = [n for n in data["nodes"] if n["type"] == "group"]
+        self.assertEqual({g["label"] for g in groups},
+                         {"Wave 0", "Wave 1", "Wave 2"})
+
+    def test_canvas_deterministic(self):
+        self.batch()
+        first = self.canvas_path().read_bytes()
+        self.canvas_path().unlink()
+        self.batch()
+        self.assertEqual(first, self.canvas_path().read_bytes())
+
+    def test_canvas_create_once(self):
+        self.canvas_path().parent.mkdir(parents=True, exist_ok=True)
+        self.canvas_path().write_text('{"nodes": [], "edges": []}',
+                                      encoding="utf-8")
+        result = self.batch()
+        self.assertEqual(result["canvas"], {"created": False})
+        self.assertEqual(self.canvas_path().read_text(encoding="utf-8"),
+                         '{"nodes": [], "edges": []}')
+
+    def test_malformed_dag_collected_not_raised(self):
+        bad = Path(self.vault, "bad-dag.json")
+        bad.write_text("not json", encoding="utf-8")
+        result = self.batch(canvas={"dag_file": str(bad)})
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertEqual(result["errors"][0]["node"], "canvas")
+        self.assertEqual(result["upserted"], 1)  # batch itself still succeeded
+
+    def test_moc_links_canvas(self):
+        self.batch()
+        text = self.read("run", "run-1")
+        self.assertIn("[[run-1.canvas]]", text)
+
+    def test_canvas_goal_redacted(self):
+        dag = {"slices": [{"id": "a", "deps": [], "risk_tier": 1,
+                           "status": "complete",
+                           "goal": "Rotate password=hunter2secret now"}]}
+        self.batch(canvas={"dag_file": self.write_dag(dag)})
+        text = self.canvas_path().read_text(encoding="utf-8")
+        self.assertNotIn("hunter2secret", text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
