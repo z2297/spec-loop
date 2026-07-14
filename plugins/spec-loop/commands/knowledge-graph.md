@@ -1,7 +1,7 @@
 ---
 description: "View or update the spec-loop Obsidian knowledge graph config — vault location, node types, and write mode, persisted globally across all runs; with an argument, answers a read-only question from the accumulated graph"
 argument-hint: "(no args — interactive config) | <free-text question — read-only query of the accumulated graph>"
-allowed-tools: ["Bash", "Read", "Write", "Edit", "AskUserQuestion"]
+allowed-tools: ["Bash", "Read", "Write", "AskUserQuestion"]
 ---
 
 # Spec-Loop Knowledge Graph — setup & update
@@ -77,8 +77,8 @@ read-only query mode; the config flow is never entered.**
 
 Answer the user's free-text question from the accumulated graph. **Hard read-only:** this
 mode writes nothing (not the config, not the vault, not any repo file) and never triggers a
-run. The `Write`/`Edit` tools in `allowed-tools` exist for the config flow and are unused
-here.
+run. The `Write` tool in `allowed-tools` exists for the config flow (full-file config
+rewrites only — the command needs no `Edit`) and is unused here.
 
 1. **Read the config.** If it is missing, `enabled` is `false`, or `vault_path` is
    null/empty → print *"knowledge graph is not enabled — run `/spec-loop:knowledge-graph`
