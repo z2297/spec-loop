@@ -30,7 +30,8 @@ CLI (used by the skill)::
     python3 knowledge_graph.py batch   < payload.json     # upsert many nodes + MOC
     python3 knowledge_graph.py upsert  --vault ... --type decision --id ... ...
     python3 knowledge_graph.py query   --vault ... [--type ...] [--tag ...] [--term ...] [--run ...]
-    python3 knowledge_graph.py context --vault ... --repo ...   # prior knowledge, read-only
+    python3 knowledge_graph.py context --vault ... --repo ... \
+        [--term ...] [--request-file ...] [--component ...]   # prior knowledge, read-only
 
 All commands print a JSON result to stdout and never raise on a per-node problem —
 they collect errors so a partial vault write is still reported, keeping the feature
@@ -549,7 +550,86 @@ def _first_paragraph(body, limit=200):
     return head.split("\n\n", 1)[0].replace("\n", " ").strip()[:limit]
 
 
-def build_context(vault_root, subfolder, repo, limit=10):
+# --------------------------------------------------------------------------
+# Context ranking — request-aware lexical relevance (reorders, never filters)
+# --------------------------------------------------------------------------
+
+_MAX_TERMS = 64      # boundedness cap on the ranking token set
+_COMPONENT_CAP = 5   # per-type cap inside each component context bucket
+
+# Fixed English function words; tokens under 3 chars are dropped anyway, so
+# only >= 3-char words need listing. Fixed set keeps ranking deterministic.
+_STOPWORDS = frozenset({
+    "and", "any", "are", "but", "can", "did", "does", "for", "from", "had",
+    "has", "have", "how", "into", "its", "may", "more", "most", "not", "off",
+    "other", "our", "out", "over", "shall", "should", "some", "such", "than",
+    "that", "the", "their", "them", "then", "there", "these", "they", "this",
+    "those", "too", "under", "until", "upon", "was", "were", "what", "when",
+    "where", "which", "while", "who", "whose", "why", "will", "with", "would",
+    "you", "your",
+})
+
+_TOKEN_RE = re.compile(r"[a-z0-9]{3,}")
+
+
+def _tokenize(text):
+    """Lowercase ``[a-z0-9]{3,}`` tokens minus stopwords, first-occurrence
+    order, deduped. Deterministic — the ranking's only text treatment."""
+    seen, out = set(), []
+    for token in _TOKEN_RE.findall((text or "").lower()):
+        if token not in _STOPWORDS and token not in seen:
+            seen.add(token)
+            out.append(token)
+    return out
+
+
+def gather_terms(term_args=(), request_file=None):
+    """Union of tokenized ``--term`` values and (optionally) a request file's
+    text, deduped preserving first occurrence, capped at ``_MAX_TERMS``.
+
+    Fail-open: a missing/unreadable file contributes nothing — the explicit
+    term args still rank. Public so it is unit-testable without the CLI.
+    """
+    parts = list(term_args or [])
+    if request_file:
+        try:
+            with open(request_file, "r", encoding="utf-8", errors="replace") as fh:
+                parts.append(fh.read(MAX_FILE_BYTES))
+        except OSError:
+            pass
+    return _tokenize(" ".join(parts))[:_MAX_TERMS]
+
+
+def _extract_links(body):
+    """``[[target]]`` ids from the managed ``kg:links`` region ONLY — prose
+    wikilinks deliberately don't count, keeping component scoping deterministic."""
+    region = _extract_region(body, _LINKS_OPEN, _LINKS_CLOSE)
+    if region is None:
+        return []
+    _before, inner, _after = region
+    return re.findall(r"\[\[([^\]|]+)(?:\|[^\]]*)?\]\]", inner)
+
+
+def _observation_text(body):
+    """Inner text of the ``kg:observations`` region, ``""`` if absent."""
+    region = _extract_region(body, _OBS_OPEN, _OBS_CLOSE)
+    return region[1] if region is not None else ""
+
+
+def _relevance(query_tokens, title, tags, body_text):
+    """Weighted lexical overlap: title hits count 3, tag hits 2, body hits 1.
+    Pure and deterministic — no corpus statistics, so output never shifts as
+    the vault grows."""
+    q = set(query_tokens)
+    if not q:
+        return 0
+    return (3 * len(q & set(_tokenize(title)))
+            + 2 * len(q & set(_tokenize(" ".join(tags))))
+            + len(q & set(_tokenize(body_text))))
+
+
+def build_context(vault_root, subfolder, repo, limit=10, terms=None,
+                  components=None):
     """Read-only prior-knowledge summary for a repo, consumed at run intake.
 
     Returns a bounded, deterministic dict: the repo's ``system`` hub one-liner;
@@ -557,8 +637,18 @@ def build_context(vault_root, subfolder, repo, limit=10):
     artifacts cannot carry); ``domain`` notes and non-superseded ``decisions``
     scoped to the repo, newest first, capped at ``limit``; and ``known_ids`` per
     type so callers reuse existing ids instead of drifting into duplicates.
+
+    With ``terms`` (a token list, e.g. from :func:`gather_terms`) entries gain a
+    ``relevance`` score and sort by it before recency — ranking **reorders,
+    never filters**, so zero-score entries still fill to the cap and an
+    off-target term list degrades to the plain newest-first output. With
+    ``components`` (slug list) the result gains a ``components`` map of
+    per-component buckets — decisions/patterns/domain whose managed links
+    include that component, capped at ``_COMPONENT_CAP`` per type — used by the
+    controller to give each slice its own scoped prior knowledge.
     """
     repo_slug = slugify(repo) if repo else ""
+    terms = list(terms) if terms else []
 
     def scan(node_type):
         reldir = _vault_reldir(subfolder, node_type)
@@ -573,22 +663,33 @@ def build_context(vault_root, subfolder, repo, limit=10):
             if text is None:
                 continue
             fm, body = _parse_frontmatter(text)
-            out.append({"id": fm.get("id", name[:-3]),
-                        "title": fm.get("title", name[:-3]),
-                        "repo": fm.get("repo", ""),
-                        "status": fm.get("status", ""),
-                        "updated": fm.get("updated", ""),
-                        "runs": len(_as_list(fm.get("runs"))),
-                        "one_liner": _first_paragraph(body)})
+            one_liner = _first_paragraph(body)
+            entry = {"id": fm.get("id", name[:-3]),
+                     "title": fm.get("title", name[:-3]),
+                     "repo": fm.get("repo", ""),
+                     "status": fm.get("status", ""),
+                     "updated": fm.get("updated", ""),
+                     "runs": len(_as_list(fm.get("runs"))),
+                     "one_liner": one_liner,
+                     "links": _extract_links(body)}
+            if terms:
+                entry["relevance"] = _relevance(
+                    terms, entry["title"], _as_list(fm.get("tags")),
+                    one_liner + " " + _observation_text(body))
+            out.append(entry)
         return out
 
-    def newest(entries):
+    def ordered(entries, cap):
         entries = sorted(entries, key=lambda e: e["id"])
         entries.sort(key=lambda e: e["updated"], reverse=True)
-        return entries[:limit]
+        if terms:
+            entries.sort(key=lambda e: e["relevance"], reverse=True)
+        return entries[:cap]
 
     def public(entry, extra=()):
         keys = ("id", "title", "one_liner", "runs", "updated") + tuple(extra)
+        if terms:
+            keys += ("relevance",)
         return {k: entry[k] for k in keys}
 
     scans = {nt: scan(nt) for nt in ("system", "component", "pattern",
@@ -598,15 +699,29 @@ def build_context(vault_root, subfolder, repo, limit=10):
     system = next((e for e in scans["system"] if e["id"] == repo_slug), None)
     decisions = [e for e in for_repo(scans["decision"])
                  if e["status"] != "superseded"]
-    return {
+    domain = for_repo(scans["domain"])
+    result = {
         "repo": repo_slug,
         "system": system["one_liner"] if system else None,
-        "patterns": [public(e) for e in newest(scans["pattern"])],
-        "domain": [public(e) for e in newest(for_repo(scans["domain"]))],
-        "decisions": [public(e, extra=("status",)) for e in newest(decisions)],
+        "patterns": [public(e) for e in ordered(scans["pattern"], limit)],
+        "domain": [public(e) for e in ordered(domain, limit)],
+        "decisions": [public(e, extra=("status",))
+                      for e in ordered(decisions, limit)],
         "known_ids": {nt: sorted(e["id"] for e in scans[nt])
                       for nt in ("system", "component", "pattern", "domain")},
     }
+    if terms:
+        result["terms"] = terms
+    if components:
+        pools = {"decisions": decisions, "patterns": scans["pattern"],
+                 "domain": domain}
+        result["components"] = {
+            comp: {key: [public(e) for e in
+                         ordered([e for e in pool if comp in e["links"]],
+                                 _COMPONENT_CAP)]
+                   for key, pool in pools.items()}
+            for comp in [slugify(c) for c in components]}
+    return result
 
 
 # Node types whose ids must stay stable across runs for accumulation to work —
@@ -774,6 +889,12 @@ def main(argv=None):
     p_c.add_argument("--subfolder", default="spec-loop")
     p_c.add_argument("--repo", required=True)
     p_c.add_argument("--limit", type=int, default=10)
+    p_c.add_argument("--term", action="append", default=[],
+                     help="repeatable relevance term — ranks (never filters) results")
+    p_c.add_argument("--request-file",
+                     help="also rank against this file's text (e.g. request.md)")
+    p_c.add_argument("--component", action="append", default=[],
+                     help="repeatable component slug — adds a scoped bucket per slug")
 
     args = parser.parse_args(argv)
     try:
@@ -792,8 +913,10 @@ def main(argv=None):
                                            args.type, args.tag, args.term,
                                            run_id=args.run)}
         else:  # context
+            terms = gather_terms(args.term, args.request_file)
             result = build_context(args.vault, args.subfolder, args.repo,
-                                   args.limit)
+                                   args.limit, terms=terms or None,
+                                   components=args.component or None)
     except (ValueError, OSError, json.JSONDecodeError) as exc:
         print(json.dumps({"error": str(exc)}))
         return 1

@@ -487,6 +487,210 @@ class TestBuildContext(TempVault):
 
 
 # --------------------------------------------------------------------------
+# Context ranking — request-aware relevance (reorders, never filters)
+# --------------------------------------------------------------------------
+
+class TestContextRanking(TempVault):
+    def seed(self):
+        self.upsert({"type": "system", "id": "repo-a", "title": "Repo A",
+                     "summary": "Service A owns deposits."},
+                    run_id="run-1", date="2026-07-01")
+        self.upsert({"type": "decision", "id": "d-bus", "repo": "repo-a",
+                     "title": "Use the event bus",
+                     "summary": "Allocate via the event bus."},
+                    run_id="run-1", date="2026-07-01")
+        self.upsert({"type": "decision", "id": "d-newer", "repo": "repo-a",
+                     "title": "Retention policy",
+                     "summary": "Keep records ninety days."},
+                    run_id="run-2", date="2026-07-06")
+
+    def test_no_terms_output_unchanged(self):
+        # Backward-compat pin: without terms/components the payload carries
+        # exactly the pre-ranking keys — no relevance, no terms echo, no buckets.
+        self.seed()
+        ctx = kg.build_context(self.vault, self.subfolder, "repo-a")
+        self.assertNotIn("terms", ctx)
+        self.assertNotIn("components", ctx)
+        for entry in ctx["decisions"]:
+            self.assertEqual(sorted(entry),
+                             ["id", "one_liner", "runs", "status", "title",
+                              "updated"])
+        # Newest-first ordering intact.
+        self.assertEqual([d["id"] for d in ctx["decisions"]],
+                         ["d-newer", "d-bus"])
+
+    def test_title_match_outranks_recency(self):
+        self.seed()
+        ctx = kg.build_context(self.vault, self.subfolder, "repo-a",
+                               terms=["event", "bus"])
+        self.assertEqual(ctx["decisions"][0]["id"], "d-bus")
+        self.assertGreater(ctx["decisions"][0]["relevance"], 0)
+        self.assertEqual(ctx["terms"], ["event", "bus"])
+
+    def test_title_weighting_beats_body_match(self):
+        self.upsert({"type": "decision", "id": "d-title", "repo": "repo-a",
+                     "title": "Outbox strategy", "summary": "A choice."},
+                    run_id="run-1", date="2026-07-01")
+        self.upsert({"type": "decision", "id": "d-body", "repo": "repo-a",
+                     "title": "Messaging", "summary": "Uses the outbox table."},
+                    run_id="run-2", date="2026-07-06")
+        ctx = kg.build_context(self.vault, self.subfolder, "repo-a",
+                               terms=["outbox"])
+        self.assertEqual([d["id"] for d in ctx["decisions"]],
+                         ["d-title", "d-body"])
+        self.assertGreater(ctx["decisions"][0]["relevance"],
+                           ctx["decisions"][1]["relevance"])
+
+    def test_observation_text_is_scored(self):
+        self.upsert({"type": "decision", "id": "d-obs", "repo": "repo-a",
+                     "title": "Plain", "summary": "Nothing here.",
+                     "observation": "Refined the saga compensation flow."},
+                    run_id="run-1", date="2026-07-01")
+        ctx = kg.build_context(self.vault, self.subfolder, "repo-a",
+                               terms=["saga", "compensation"])
+        self.assertEqual(ctx["decisions"][0]["id"], "d-obs")
+        self.assertGreater(ctx["decisions"][0]["relevance"], 0)
+
+    def test_zero_score_entries_still_fill_to_limit(self):
+        # Ranking reorders, never filters — the recency floor survives.
+        self.seed()
+        ctx = kg.build_context(self.vault, self.subfolder, "repo-a",
+                               terms=["zzzunmatched"])
+        self.assertEqual(len(ctx["decisions"]), 2)
+        for entry in ctx["decisions"]:
+            self.assertEqual(entry["relevance"], 0)
+        # All zero → recency order.
+        self.assertEqual([d["id"] for d in ctx["decisions"]],
+                         ["d-newer", "d-bus"])
+
+    def test_tie_breaks_deterministic(self):
+        self.upsert({"type": "decision", "id": "d-b", "repo": "repo-a",
+                     "title": "Same day B"}, run_id="run-1", date="2026-07-01")
+        self.upsert({"type": "decision", "id": "d-a", "repo": "repo-a",
+                     "title": "Same day A"}, run_id="run-1", date="2026-07-01")
+        ctx = kg.build_context(self.vault, self.subfolder, "repo-a",
+                               terms=["zzzunmatched"])
+        # Equal relevance, equal updated → id ascending.
+        self.assertEqual([d["id"] for d in ctx["decisions"]], ["d-a", "d-b"])
+
+    def test_stopwords_and_short_tokens_ignored(self):
+        tokens = kg._tokenize("The use of an ID is not what we want")
+        self.assertNotIn("the", tokens)
+        self.assertNotIn("not", tokens)
+        self.assertNotIn("id", tokens)   # < 3 chars
+        self.assertIn("want", tokens)
+
+    def test_gather_terms_from_file_and_args(self):
+        req = Path(self.vault, "request.md")
+        req.write_text("Migrate the deposit allocation to the event bus",
+                       encoding="utf-8")
+        terms = kg.gather_terms(["outbox saga"], str(req))
+        self.assertIn("outbox", terms)
+        self.assertIn("saga", terms)
+        self.assertIn("deposit", terms)
+        self.assertNotIn("the", terms)
+        # Missing file falls back to the args alone (fail-open).
+        self.assertEqual(kg.gather_terms(["outbox"], "/nonexistent/x.md"),
+                         ["outbox"])
+        self.assertLessEqual(
+            len(kg.gather_terms(["t" + str(i) * 3 for i in range(100)], None)),
+            kg._MAX_TERMS)
+
+    def test_relevance_field_only_with_terms(self):
+        self.seed()
+        with_terms = kg.build_context(self.vault, self.subfolder, "repo-a",
+                                      terms=["event"])
+        without = kg.build_context(self.vault, self.subfolder, "repo-a")
+        self.assertIn("relevance", with_terms["decisions"][0])
+        self.assertNotIn("relevance", without["decisions"][0])
+
+
+# --------------------------------------------------------------------------
+# Component-scoped context — per-slice prior knowledge buckets
+# --------------------------------------------------------------------------
+
+class TestComponentContext(TempVault):
+    def seed(self):
+        self.upsert({"type": "component", "id": "auth-service",
+                     "title": "Auth service"},
+                    run_id="run-1", date="2026-07-01")
+        self.upsert({"type": "decision", "id": "d-auth", "repo": "repo-a",
+                     "title": "JWT everywhere", "links": ["auth-service"]},
+                    run_id="run-1", date="2026-07-01")
+        self.upsert({"type": "pattern", "id": "token-refresh", "repo": "repo-b",
+                     "title": "Token refresh", "links": ["auth-service"]},
+                    run_id="run-1", date="2026-07-01")
+        self.upsert({"type": "domain", "id": "repo-a-billing", "repo": "repo-a",
+                     "title": "Billing rules", "links": ["billing"]},
+                    run_id="run-1", date="2026-07-01")
+
+    def test_component_bucket_lists_linked_nodes(self):
+        self.seed()
+        ctx = kg.build_context(self.vault, self.subfolder, "repo-a",
+                               components=["auth-service"])
+        bucket = ctx["components"]["auth-service"]
+        self.assertEqual([d["id"] for d in bucket["decisions"]], ["d-auth"])
+        self.assertEqual([p["id"] for p in bucket["patterns"]],
+                         ["token-refresh"])
+        self.assertEqual(bucket["domain"], [])
+
+    def test_component_bucket_respects_repo_scope_and_supersession(self):
+        self.seed()
+        self.upsert({"type": "decision", "id": "d-super", "repo": "repo-a",
+                     "title": "Old auth", "status": "superseded",
+                     "links": ["auth-service"]},
+                    run_id="run-1", date="2026-07-01")
+        self.upsert({"type": "decision", "id": "d-other-repo", "repo": "repo-b",
+                     "title": "Their auth", "links": ["auth-service"]},
+                    run_id="run-1", date="2026-07-01")
+        ctx = kg.build_context(self.vault, self.subfolder, "repo-a",
+                               components=["auth-service"])
+        ids = [d["id"] for d in ctx["components"]["auth-service"]["decisions"]]
+        self.assertNotIn("d-super", ids)
+        self.assertNotIn("d-other-repo", ids)
+        # Cross-repo patterns still surface (patterns are cross-repo by design).
+        self.assertEqual([p["id"] for p in
+                          ctx["components"]["auth-service"]["patterns"]],
+                         ["token-refresh"])
+
+    def test_prose_wikilinks_do_not_count(self):
+        rel = kg.note_relpath(self.subfolder, "decision", "d-prose")
+        path = Path(self.vault, rel)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "---\ntype: decision\nid: d-prose\ntitle: Prose link\n"
+            "tags: [spec-loop, decision, repo-a]\nrepo: repo-a\n"
+            "runs: [run-1]\ncreated: 2026-07-01\nupdated: 2026-07-01\n---\n"
+            "Mentions [[auth-service]] in prose only.\n",
+            encoding="utf-8")
+        ctx = kg.build_context(self.vault, self.subfolder, "repo-a",
+                               components=["auth-service"])
+        self.assertEqual(ctx["components"]["auth-service"]["decisions"], [])
+
+    def test_unknown_component_yields_empty_bucket(self):
+        self.seed()
+        ctx = kg.build_context(self.vault, self.subfolder, "repo-a",
+                               components=["no-such-thing"])
+        self.assertEqual(ctx["components"]["no-such-thing"],
+                         {"decisions": [], "patterns": [], "domain": []})
+        # And no components key at all when the arg is absent.
+        self.assertNotIn("components",
+                         kg.build_context(self.vault, self.subfolder, "repo-a"))
+
+    def test_component_bucket_capped(self):
+        self.seed()
+        for i in range(7):
+            self.upsert({"type": "decision", "id": f"d-cap-{i}", "repo": "repo-a",
+                         "title": f"Cap {i}", "links": ["auth-service"]},
+                        run_id="run-1", date=f"2026-07-0{i + 1}")
+        ctx = kg.build_context(self.vault, self.subfolder, "repo-a",
+                               components=["auth-service"])
+        self.assertEqual(
+            len(ctx["components"]["auth-service"]["decisions"]),
+            kg._COMPONENT_CAP)
+
+
+# --------------------------------------------------------------------------
 # Id-drift remap — mechanical reference-before-create
 # --------------------------------------------------------------------------
 
