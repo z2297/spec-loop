@@ -40,10 +40,11 @@ Read `~/.claude/spec-loop/knowledge-graph.json` (expand `~`). It is created only
   it must be silent and cheap. (When the caller is the **peer-review command** there is no
   decisions-log — the bail path is a plain, silent return.)
 - Otherwise read `vault_path`, `subfolder` (default `spec-loop`), `write_mode`
-  (default `mcp-preferred`), and `node_types` (default the four content types —
+  (default `mcp-preferred`), `node_types` (default the four content types —
   `review` is a fifth, **non-default** option that additionally enables the peer-review
-  post-report projection). Only emit nodes whose `type` is in `node_types`; `component`
-  and `run` structural nodes are always allowed.
+  post-report projection), and optional `starter_base` (default `true` — set `false` to
+  stop the loop from recreating a deleted `spec-loop.base`). Only emit nodes whose `type`
+  is in `node_types`; `component` and `run` structural nodes are always allowed.
 
 ## Step 2 — Node taxonomy & schema (what to record)
 
@@ -66,7 +67,9 @@ node ids → `[[wikilinks]]`), optional `index` (a managed snapshot region repla
 on every upsert — used by the run MOC's grouped listing; you normally never set it directly),
 and for decisions optional `status` (`active`/`superseded`) and `reversibility`
 (`trivial`/`moderate`/`high`). Review nodes additionally carry `verdict`
-(`APPROVE`/`APPROVE_WITH_COMMENTS`/`REQUEST_CHANGES`).
+(`APPROVE`/`APPROVE_WITH_COMMENTS`/`REQUEST_CHANGES`). The helper also maintains an
+`aliases` frontmatter entry (the human title, unioned with any user-added aliases) so
+Obsidian wikilinks and the quick switcher resolve nodes by title, not just slug.
 
 **`runs` semantics.** The `runs` frontmatter list records **writer ids** — spec-loop
 run-ids and peer-review review-ids alike (the field name is kept for schema stability). A
@@ -131,10 +134,26 @@ Payload shape:
 Include `"moc"` only when finalizing the run (runbook), or when the controller wants the MOC
 refreshed at Phase 1. When building the MOC the helper scans the vault for every node whose
 `runs` include this run-id, so nodes written at earlier wave boundaries appear without
-re-upserting them. The helper returns a JSON summary (`upserted`, `created`, `updated`,
-`redactions`, `remapped`, `errors`) — log a one-line digest to `decisions-log.md`. **Never
-let a vault error block the loop:** the helper collects per-node errors instead of raising;
-if the whole call fails, log the failure and continue the run.
+re-upserting them — and, when the payload carries a `repo`, it also refreshes the
+`System/<repo>` hub's **home index** (managed `kg:index` region: runs newest-first, active
+decisions, patterns, domain, reviews) at the same moment.
+
+Two optional payload keys add Obsidian-native artifacts, both **create-once-if-absent**
+(neither format has managed regions, so an existing file — possibly user-customized — is
+never touched):
+
+- `"ensure_base": true` — create the starter `spec-loop.base` (Obsidian Bases table views
+  over the graph's note types) at the subfolder root. The controller sends this at Phase 1
+  unless the config sets `starter_base: false`.
+- `"canvas": {"dag_file": "<abs path to dag.json>"}` — render `Runs/<run-id>.canvas`, a
+  JSON Canvas wave-layout of the run DAG (risk-tier colored, dep edges), linked from the
+  run MOC. **Runbook only** — the DAG is final at Phase 5; the controller never sends it.
+
+The helper returns a JSON summary (`upserted`, `created`, `updated`, `redactions`,
+`remapped`, `errors`, plus `base`/`canvas` `{created}` blocks when requested) — log a
+one-line digest to `decisions-log.md`. **Never let a vault error block the loop:** the
+helper collects per-node errors instead of raising; if the whole call fails, log the
+failure and continue the run.
 
 Use `query` to discover existing nodes for reference/dedup when the MCP is unavailable:
 ```bash
@@ -148,15 +167,18 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/knowledge_graph.py" query --vault <path> 
   conventions summary (Step 5). Read-only; never gates intake.
 - **Controller, Phase 1:** upsert the `system/<repo>` hub (create-or-touch — adds this
   `run-id` to a note that persists across runs) with a short `summary` of the system, and
-  create the `run/<run-id>` MOC. One batch.
+  create the `run/<run-id>` MOC. One batch, with `"ensure_base": true` unless the config
+  sets `starter_base: false` (the hub home index refreshes automatically with the MOC).
 - **Controller, each wave boundary:** for the material decisions and council verdicts logged
   to `decisions-log.md` this wave, upsert `decision` nodes (+ `component` hubs they touch),
   linking each to the `run`, the `system`, and touched `component`s. Also emit a `decision`
   node for each **human-answered escalation**. Serial, in the main session.
 - **Runbook, Phase 5:** the full synthesis from the durable artifacts it already reads —
   upsert `pattern` and `domain` nodes, any remaining `decision`s, the `component` hubs, then
-  **finalize the `run` MOC** linking everything. Record a `knowledge_graph` block in the
-  runbook front-matter (`{ vault, subfolder, nodes_written, errors }`) for traceability.
+  **finalize the `run` MOC** linking everything, passing
+  `"canvas": {"dag_file": …}` so the run's DAG canvas is created (once) and linked.
+  Record a `knowledge_graph` block in the runbook front-matter
+  (`{ vault, subfolder, nodes_written, errors }`) for traceability.
 - **Peer-review command, post-report (doubly opt-in):** only when `"review"` is in the
   configured `node_types`, and strictly after the review report and verdict are final. One
   `batch` call, payload `run_id` = the `<review-id>`, upserting a **single `review` node**

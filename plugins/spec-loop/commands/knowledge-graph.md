@@ -67,7 +67,10 @@ read-only query mode; the config flow is never entered.**
    }
    ```
    When disabled, write `"enabled": false` and `"vault_path": null` (unless a valid one was
-   previously set — then preserve it).
+   previously set — then preserve it). An optional `"starter_base"` key (default `true`,
+   not prompted for — edit the file to change it) controls whether the loop create-onces a
+   `spec-loop.base` starter view (Obsidian Bases tables over the graph's notes) in the
+   subfolder; set it `false` to keep a deleted one from coming back.
 
 6. **Confirm.** Print the absolute config path and the final values, and remind the user this
    applies to **all** future `/spec-loop` runs until they run `/spec-loop:knowledge-graph`

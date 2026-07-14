@@ -214,9 +214,12 @@ plugin dependency exists, and no preflight plugin check is needed.
 5. **Seed the knowledge graph (only if enabled).** If `~/.claude/spec-loop/knowledge-graph.json`
    is `enabled` with a `vault_path`, invoke the `knowledge-graph` skill once to upsert the
    `system/<repo>` hub (a create-or-touch that adds this `run-id` to a note persisting across
-   runs, with a one-line summary of the system) and create the `run/<run-id>` MOC. If disabled,
-   skip silently. This is a single serial helper call in the main session — it does not gate or
-   delay wave scheduling.
+   runs, with a one-line summary of the system) and create the `run/<run-id>` MOC. Include
+   `"ensure_base": true` in the batch unless the config sets `starter_base: false` — the
+   helper create-onces the vault's `spec-loop.base` starter view and refreshes the hub's
+   home index as side effects of the MOC batch. If disabled, skip silently. This is a
+   single serial helper call in the main session — it does not gate or delay wave
+   scheduling.
 
 ## Phase 2 — Schedule waves
 

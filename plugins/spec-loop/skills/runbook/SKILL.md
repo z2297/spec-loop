@@ -106,10 +106,15 @@ The controller hands this procedure:
     boundaries (from §5), the `component` hubs they touch, and **finalize the `run/<run-id>`
     MOC** — the helper collects every node this run touched by scanning the vault, so
     wave-boundary decisions appear in the MOC without re-upserting them. Update the repo
-    `system` hub with a one-line delta. Then record a `knowledge_graph` block in this
-    runbook's front-matter (below) from the helper's returned summary. If disabled, skip
-    silently and set the front-matter field to `disabled`. This step never blocks the run: a
-    vault/MCP error is logged and the runbook is still written.
+    `system` hub with a one-line delta (the helper also refreshes the hub's home index as a
+    side effect of the MOC batch). Include
+    `"canvas": {"dag_file": "docs/spec-loop/<run-id>/dag.json"}` (absolute path) in the
+    batch — the helper create-onces a `Runs/<run-id>.canvas` wave-layout view of the DAG
+    and links it from the MOC; an existing canvas is never overwritten. Then record a
+    `knowledge_graph` block in this runbook's front-matter (below) from the helper's
+    returned summary. If disabled, skip silently and set the front-matter field to
+    `disabled`. This step never blocks the run: a vault/MCP error is logged and the
+    runbook is still written.
 
 ## The runbook schema (PINNED — a stable contract)
 
@@ -131,7 +136,7 @@ integration_gate: <green | green-after-remediation>
 slice_counts: { complete: <n>, split: <n>, remediation: <n> }
 gap_counts: { known_gaps: <n>, deferred: <n>, open_findings: <n> }
 publish: <pushed-feature-branch | merged-main | left-local | per-slice-prs | pending>
-knowledge_graph: <disabled | { vault: <path>, subfolder: <name>, nodes_written: <n>, errors: <n>, redactions: <n> }>  # redactions optional
+knowledge_graph: <disabled | { vault: <path>, subfolder: <name>, nodes_written: <n>, errors: <n>, redactions: <n>, canvas: <created | existing | skipped> }>  # redactions and canvas optional
 ```
 
 ### Executive Readout (self-contained — printed verbatim to the terminal)

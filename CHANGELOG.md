@@ -23,6 +23,19 @@ prior build. Pinned entries map to git tags `v<version>`.
 
 ## [Unreleased]
 ### Added
+- **Knowledge-graph Obsidian-native UX.** Notes gain an `aliases` frontmatter entry (the
+  human title, unioned with user-added aliases) so wikilinks and the quick switcher
+  resolve by title; commas are now quoted in frontmatter scalars so titles survive the
+  inline-list round-trip. A create-once `spec-loop.base` starter (Obsidian Bases table
+  views over Runs/Decisions/Patterns/Domain/Reviews, tag-filtered) is written at Phase 1
+  via the batch key `ensure_base` — opt out with `starter_base: false` in the config. The
+  `System/<repo>` hub maintains a per-repo home index (runs newest-first, active
+  decisions, patterns, domain, reviews) in its managed `kg:index` region, refreshed at
+  the existing MOC moments with no new caller step. Each run gets a
+  `Runs/<run-id>.canvas` — a JSON Canvas 1.0 wave-layout of the run DAG (longest-path
+  layering, risk-tier colors, dep edges), created once at runbook time via the batch key
+  `canvas: {dag_file}`, linked from the run MOC, and never overwritten (user
+  rearrangements survive). `query` results now carry `repo`/`status`/`created`/`updated`.
 - **Peer-review → knowledge graph (doubly opt-in `review` node type).** After
   `/spec-loop:peer-review` publishes its report, it can project the verdict into the
   Obsidian knowledge graph as ONE `Reviews/<review-id>.md` note — `verdict` frontmatter,

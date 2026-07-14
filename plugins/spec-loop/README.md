@@ -330,6 +330,15 @@ duplicating it), so Obsidian's graph view becomes a navigable map of your codeba
 - **Ask the graph.** `/spec-loop:knowledge-graph <question>` answers a free-text question
   from the accumulated graph — bounded read-only retrieval plus up to three note reads,
   with cited titles/paths and staleness noted. No args still opens the config flow.
+- **First-class in Obsidian.** Notes carry typed frontmatter properties plus an `aliases`
+  entry (wikilinks and the quick switcher resolve by human title); a create-once
+  `spec-loop.base` ships Bases table views over Runs/Decisions/Patterns/Domain/Reviews;
+  the `System/<repo>` hub maintains a per-repo home index (runs, active decisions,
+  patterns, domain, reviews) as the entry point a human opens; and each run gets a
+  `Runs/<run-id>.canvas` — a JSON Canvas wave-layout of the run DAG, risk-tier colored,
+  created once at runbook time and never overwritten (rearrange it freely). For a colored
+  graph view, add Obsidian graph color groups on `tag:#decision`, `tag:#pattern`, etc. —
+  the type tags are already on every note.
 - **Writes are MCP-preferred with a direct-file fallback.** With the Obsidian app + Local REST
   API MCP reachable, it uses it (live indexing + cross-vault link discovery); otherwise it
   writes the markdown straight to disk (Obsidian indexes it on next open). Requires an Obsidian
