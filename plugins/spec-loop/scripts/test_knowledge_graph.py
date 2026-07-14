@@ -748,5 +748,124 @@ class TestIdRemap(TempVault):
                              "outbox-pattern.md").exists())
 
 
+# --------------------------------------------------------------------------
+# Review nodes — the peer-review capture surface
+# --------------------------------------------------------------------------
+
+class TestReviewNodes(TempVault):
+    REVIEW_ID = "github-acme-pr482-9f3a1c2"
+
+    def review_payload(self, **overrides):
+        payload = {
+            "vault": self.vault, "subfolder": self.subfolder,
+            "run_id": self.REVIEW_ID, "date": "2026-07-14", "repo": "repo-a",
+            "nodes": [
+                {"type": "review", "id": self.REVIEW_ID,
+                 "title": "PR review acme#482: REQUEST_CHANGES",
+                 "verdict": "REQUEST_CHANGES",
+                 "summary": "repo-a PR 482 reviewed: request changes.",
+                 "observation": "P0: 1, P1: 2. Titles: auth bypass on refresh; "
+                                "missing rate limit; stale cache on logout.",
+                 "links": ["repo-a"]},
+                {"type": "system", "id": "repo-a", "title": "Repo A"},
+            ],
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_review_node_lands_in_reviews_dir_with_verdict(self):
+        result = kg._run_batch(self.review_payload())
+        self.assertEqual(result["errors"], [])
+        text = self.read("review", self.REVIEW_ID)
+        self.assertIn("type: review", text)
+        self.assertIn("verdict: REQUEST_CHANGES", text)
+        self.assertIn("tags: [spec-loop, review, repo-a]", text)
+        self.assertTrue(Path(self.vault, self.subfolder, "Reviews",
+                             f"{self.REVIEW_ID}.md").exists())
+
+    def test_verdict_absent_when_not_provided(self):
+        self.upsert({"type": "decision", "id": "d1", "repo": "repo-a",
+                     "title": "D1"}, run_id="run-1", date="2026-07-01")
+        self.assertNotIn("verdict:", self.read("decision", "d1"))
+
+    def test_batch_with_review_id_appends_to_system_hub_runs(self):
+        self.upsert({"type": "system", "id": "repo-a", "title": "Repo A",
+                     "summary": "Service A."}, run_id="run-1", date="2026-07-01")
+        kg._run_batch(self.review_payload())
+        text = self.read("system", "repo-a")
+        self.assertIn(f"runs: [run-1, {self.REVIEW_ID}]", text)
+
+    def test_review_batch_retry_byte_identical(self):
+        def snapshot():
+            files = {}
+            for root, _dirs, names in os.walk(self.vault):
+                for name in sorted(names):
+                    p = Path(root, name)
+                    files[str(p.relative_to(self.vault))] = p.read_bytes()
+            return files
+        kg._run_batch(self.review_payload())
+        first = snapshot()
+        kg._run_batch(self.review_payload())
+        self.assertEqual(first, snapshot())
+
+    def test_review_batch_omits_moc(self):
+        kg._run_batch(self.review_payload())
+        self.assertFalse(Path(self.vault, self.subfolder, "Runs").exists())
+
+    def test_review_type_not_remap_eligible(self):
+        # A near-miss review id must create a new note, never remap onto an
+        # existing review — review ids are unique per review, like run ids.
+        kg._run_batch(self.review_payload())
+        near_miss = self.REVIEW_ID + "-review"
+        result = kg._run_batch(self.review_payload(
+            run_id=near_miss,
+            nodes=[{"type": "review", "id": near_miss,
+                    "title": "PR review acme#482: APPROVE",
+                    "verdict": "APPROVE"}]))
+        self.assertEqual(result["remapped"], [])
+        reviews = Path(self.vault, self.subfolder, "Reviews")
+        self.assertEqual(len(list(reviews.glob("*.md"))), 2)
+
+    def test_context_includes_repo_scoped_reviews_capped(self):
+        kg._run_batch(self.review_payload())
+        kg._run_batch(self.review_payload(
+            run_id="rev-other", repo="repo-b",
+            nodes=[{"type": "review", "id": "rev-other",
+                    "title": "Other repo review", "verdict": "APPROVE"}]))
+        ctx = kg.build_context(self.vault, self.subfolder, "repo-a")
+        self.assertEqual([r["id"] for r in ctx["reviews"]], [self.REVIEW_ID])
+        self.assertEqual(ctx["reviews"][0]["verdict"], "REQUEST_CHANGES")
+        self.assertNotIn("review", ctx["known_ids"])
+        # Cap respected.
+        for i in range(12):
+            kg._run_batch(self.review_payload(
+                run_id=f"rev-{i:02d}",
+                nodes=[{"type": "review", "id": f"rev-{i:02d}",
+                        "title": f"Review {i}", "verdict": "APPROVE",
+                        "repo": "repo-a"}]))
+        ctx = kg.build_context(self.vault, self.subfolder, "repo-a", limit=10)
+        self.assertEqual(len(ctx["reviews"]), 10)
+
+    def test_context_reviews_empty_vault_well_formed(self):
+        ctx = kg.build_context(self.vault, self.subfolder, "repo-a")
+        self.assertEqual(ctx["reviews"], [])
+
+    def test_query_results_carry_one_liner(self):
+        self.upsert({"type": "pattern", "id": "outbox", "title": "Outbox",
+                     "summary": "Transactional outbox for exactly-once."},
+                    run_id="run-1", date="2026-07-01")
+        found = kg.query_nodes(self.vault, self.subfolder, node_type="pattern")
+        self.assertEqual(found[0]["one_liner"],
+                         "Transactional outbox for exactly-once.")
+
+    def test_review_observation_secret_redacted(self):
+        result = kg._run_batch(self.review_payload(
+            nodes=[{"type": "review", "id": self.REVIEW_ID,
+                    "title": "PR review", "verdict": "APPROVE",
+                    "observation": "P0: token=abcdefgh12345678 leaked in config."}]))
+        self.assertEqual(result["redactions"], 1)
+        self.assertNotIn("abcdefgh12345678", self.read("review", self.REVIEW_ID))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

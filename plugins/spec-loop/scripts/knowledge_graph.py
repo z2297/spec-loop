@@ -20,6 +20,7 @@ Vault layout (under ``<vault_root>/<subfolder>/``, subfolder defaults to
     Decisions/<repo>-<slug>.md   ADR-style, one per material decision
     Patterns/<slug>.md           architecture/design patterns — accumulate
     Domain/<repo>-<slug>.md       business rules / domain logic
+    Reviews/<review-id>.md        ONE per peer review — verdict + P0/P1 titles
     Runs/<run-id>.md              MOC index tying a run's nodes together
 
 Nodes are identified by ``(type, id)``. Edges are Obsidian ``[[wikilinks]]``
@@ -58,6 +59,7 @@ TYPE_DIRS = {
     "decision": "Decisions",
     "pattern": "Patterns",
     "domain": "Domain",
+    "review": "Reviews",
     "run": "Runs",
 }
 
@@ -77,7 +79,7 @@ _V1_MOC_SENTINEL = "Knowledge-graph index for spec-loop run"
 
 # Canonical frontmatter key order for stable, diff-friendly output.
 _FM_ORDER = ["type", "id", "title", "tags", "repo", "runs",
-             "created", "updated", "status", "reversibility"]
+             "created", "updated", "status", "reversibility", "verdict"]
 
 
 # --------------------------------------------------------------------------
@@ -376,7 +378,7 @@ def upsert_node(vault_root, subfolder, node, run_id, date):
     """Create or idempotently update one node's note.
 
     ``node`` is a dict: ``{type, id, title, repo?, summary?, observation?,
-    index?, links?, status?, reversibility?}``. On an existing note we union
+    index?, links?, status?, reversibility?, verdict?}``. On an existing note we union
     ``tags``, append ``run_id`` to ``runs`` (deduped), bump ``updated``, append a
     dated observation block, replace the ``index`` region wholesale, and merge
     links — never duplicating. Returns ``{path, created}``. Raises ``ValueError``
@@ -428,6 +430,8 @@ def upsert_node(vault_root, subfolder, node, run_id, date):
         fm["status"] = node["status"]
     if node.get("reversibility"):
         fm["reversibility"] = node["reversibility"]
+    if node.get("verdict"):
+        fm["verdict"] = node["verdict"]
 
     body = _replace_index(body, node.get("index"))
     body = _merge_observation(body, run_id, date, node.get("observation"))
@@ -534,6 +538,7 @@ def query_nodes(vault_root, subfolder, node_type=None, tag=None, term=None,
                 "title": fm.get("title", name[:-3]),
                 "type": fm.get("type", nt),
                 "tags": tags,
+                "one_liner": _first_paragraph(body),
             })
     return results
 
@@ -668,6 +673,7 @@ def build_context(vault_root, subfolder, repo, limit=10, terms=None,
                      "title": fm.get("title", name[:-3]),
                      "repo": fm.get("repo", ""),
                      "status": fm.get("status", ""),
+                     "verdict": fm.get("verdict", ""),
                      "updated": fm.get("updated", ""),
                      "runs": len(_as_list(fm.get("runs"))),
                      "one_liner": one_liner,
@@ -693,7 +699,7 @@ def build_context(vault_root, subfolder, repo, limit=10, terms=None,
         return {k: entry[k] for k in keys}
 
     scans = {nt: scan(nt) for nt in ("system", "component", "pattern",
-                                     "domain", "decision")}
+                                     "domain", "decision", "review")}
     for_repo = lambda entries: [e for e in entries  # noqa: E731
                                 if not repo_slug or e["repo"] == repo_slug]
     system = next((e for e in scans["system"] if e["id"] == repo_slug), None)
@@ -707,6 +713,10 @@ def build_context(vault_root, subfolder, repo, limit=10, terms=None,
         "domain": [public(e) for e in ordered(domain, limit)],
         "decisions": [public(e, extra=("status",))
                       for e in ordered(decisions, limit)],
+        # Reviews are repo-scoped and never in known_ids — a review id is unique
+        # per review (like a run id), so there is nothing to reuse.
+        "reviews": [public(e, extra=("verdict",))
+                    for e in ordered(for_repo(scans["review"]), limit)],
         "known_ids": {nt: sorted(e["id"] for e in scans[nt])
                       for nt in ("system", "component", "pattern", "domain")},
     }
@@ -873,6 +883,8 @@ def main(argv=None):
     p_up.add_argument("--observation", default="")
     p_up.add_argument("--status", default="")
     p_up.add_argument("--reversibility", default="")
+    p_up.add_argument("--verdict", default="",
+                      help="review verdict (review nodes only by convention)")
     p_up.add_argument("--link", action="append", default=[], help="repeatable link target id")
 
     p_q = sub.add_parser("query", help="find existing nodes (for reference/dedup)")
@@ -905,7 +917,8 @@ def main(argv=None):
             node = {"type": args.type, "id": args.id, "title": args.title,
                     "repo": args.repo, "summary": args.summary,
                     "observation": args.observation, "links": args.link,
-                    "status": args.status, "reversibility": args.reversibility}
+                    "status": args.status, "reversibility": args.reversibility,
+                    "verdict": args.verdict}
             res = upsert_node(args.vault, args.subfolder, node, args.run, args.date)
             result = {"created": res["created"], "path": res["path"]}
         elif args.cmd == "query":
