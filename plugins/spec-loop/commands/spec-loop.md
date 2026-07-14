@@ -118,12 +118,19 @@ plugin dependency exists, and no preflight plugin check is needed.
    - **Prior knowledge (only if the knowledge graph is enabled).** If
      `~/.claude/spec-loop/knowledge-graph.json` is `enabled` with a `vault_path`, run one
      read-only helper call —
-     `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/knowledge_graph.py" context --vault <vault_path> --subfolder <subfolder> --repo <repo-slug>`
-     — and append a short `## Prior knowledge (knowledge graph)` section to the conventions
-     summary: the system hub one-liner, existing patterns (cross-repo) with their
-     one-liners, active decisions and domain notes for this repo, and the `known_ids` lists
-     with an instruction to reuse those exact ids in any later graph writes. If the call
-     fails or the graph is disabled, omit the section silently — this never gates intake.
+     `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/knowledge_graph.py" context --vault <vault_path> --subfolder <subfolder> --repo <repo-slug> --term <t> ...`
+     — passing 5–8 salient terms distilled from the request (domain nouns, subsystem
+     names; the helper ranks by deterministic lexical overlap and **reorders, never
+     filters**). Append a short `## Prior knowledge (knowledge graph)` section to the
+     conventions summary: the system hub one-liner, existing patterns (cross-repo) with
+     their one-liners, active decisions and domain notes for this repo, and the
+     `known_ids` lists with an instruction to reuse those exact ids in any later graph
+     writes. Keep the section the same size as before — ranking changes order, not caps.
+     List any decision returned with `relevance > 0` under a sub-heading
+     **Prior decisions that may bear on this request** with the instruction: the Iron
+     Council must verify the request against these and flag contradictions — the graph
+     only surfaces candidates, it does not judge conflict. If the call fails or the graph
+     is disabled, omit the section silently — this never gates intake.
 6. **Convene the Iron Council on the request (intake).** Intake always convenes
    the full five — tier-scaled composition applies only at pre-execution (there is
    no tier before decomposition). Before decomposing, invoke the `iron-council`
@@ -235,6 +242,17 @@ background dispatch to work below depth 1.
    tip of `base_ref` under `.worktrees/spec-loop/<run-id>/<slice-id>` — before any
    other work. In `single-branch` mode the worker does **not** merge or push; it
    finishes as a verified, committed branch and the controller integrates it (Phase 3).
+   - **Component-scoped prior knowledge (only if the knowledge graph is enabled).**
+     Before dispatching the wave, run ONE read-only helper call for the whole wave —
+     `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/knowledge_graph.py" context --vault <vault_path> --subfolder <subfolder> --repo <repo-slug> --request-file docs/spec-loop/<run-id>/request.md --component <s> ...`
+     — with the **union of the wave's slices' `subsystems`** (slugified) as repeated
+     `--component` flags. From the returned `components` map, inject into each slice's
+     dispatch prompt a `## Prior knowledge for this slice (knowledge graph)` section
+     covering only the components that slice touches — **≤ ~120 words / ~10 lines**,
+     ids + one-liners only. Slices whose components all have empty buckets get no
+     section. This is a controller pre-fetch: **slice workers still never invoke the
+     knowledge-graph skill or helper.** On any error, dispatch without the section —
+     never delay a wave.
    - **Fallback:** if a background dispatch is rejected because you are yourself a
      subagent (e.g. `/spec-loop` was invoked from within another agent), re-dispatch
      the wave's slices **synchronously** (`run_in_background: false`) instead. The

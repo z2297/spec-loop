@@ -155,7 +155,8 @@ read-only call:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/knowledge_graph.py" context \
-  --vault <vault_path> --subfolder <subfolder> --repo <repo-slug>
+  --vault <vault_path> --subfolder <subfolder> --repo <repo-slug> \
+  --term <t> --term <t> ...          # 5–8 salient request terms (optional)
 ```
 
 It returns a bounded JSON summary: the repo's `system` hub one-liner, **all `patterns`**
@@ -165,6 +166,28 @@ It returns a bounded JSON summary: the repo's `system` hub one-liner, **all `pat
 `## Prior knowledge (knowledge graph)` section to the conventions summary from it —
 including the `known_ids` with an instruction to reuse those exact ids in later graph
 writes. On any error, omit the section silently.
+
+**Relevance ranking (`--term` / `--request-file`).** When terms are passed, the helper scores
+each `pattern`/`domain`/`decision` by deterministic lexical overlap (title hits ×3, tag hits
+×2, opening-prose + observation hits ×1) and sorts by score before recency. Ranking
+**reorders, never filters** — zero-score entries still fill to the cap, so the recency floor
+survives an off-target term list. Each entry gains a `relevance` field; the result echoes the
+`terms` used. A `relevance` score is lexical overlap only — synonyms and paraphrases score
+zero — so treat it as a retrieval hint, never a judgment. Decisions with `relevance > 0` are
+the "prior decisions that may bear on this request" the controller surfaces to the Iron
+Council for a conflict check: **the helper surfaces candidates; the council judges
+contradiction.**
+
+**Component-scoped slice context (`--component`, repeatable).** When component slugs are
+passed, the result gains a `components` map — per slug, the decisions/patterns/domain whose
+managed links region names that component, capped at 5 per type. The **controller** uses this
+to pre-fetch per-slice prior knowledge at each wave boundary (one call per wave with the
+union of the wave's slices' subsystems) and injects a small scoped section into each slice's
+dispatch prompt. Slice workers never call the helper themselves.
+
+**Read-path budget.** At most one `context` call at Phase 0 and one per wave boundary (the
+component-scoped pre-fetch). The injected per-slice section stays small (~120 words, ids +
+one-liners); the Phase 0 section keeps its existing caps.
 
 This **complements, never replaces**, cross-run learning from plain run artifacts: the
 historian's strongest precedent remains prior runs' human-answered escalations on disk;
@@ -190,6 +213,10 @@ above stays the first line of defense.
   breaks cross-run accumulation into duplicates.
 - **Hand-merging note markdown** instead of using the helper — loses idempotency.
 - Emitting node types not in the configured `node_types`.
+- **Treating a `relevance` score as a conflict verdict** — it is lexical overlap only; the
+  Iron Council judges whether a surfaced prior decision actually contradicts the request.
+- **Fetching slice context from inside a slice worker** — the controller pre-fetches
+  component-scoped context once per wave and injects it; workers never touch the vault.
 
 ## Known limitations
 
@@ -199,3 +226,7 @@ above stays the first line of defense.
   files exist in different type dirs and Obsidian's resolution is ambiguous. Accepted for
   now — prefer distinct, specific component ids (`jobs-scheduler`, not `jobs`) when a
   collision looms.
+- **Ranking is lexical, not semantic.** `--term` relevance is term overlap after stopword
+  removal — synonyms and paraphrases score zero. The reorder-never-filter rule keeps
+  unranked knowledge visible (recency floor), so a missed synonym costs position, not
+  presence.

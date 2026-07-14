@@ -23,6 +23,20 @@ prior build. Pinned entries map to git tags `v<version>`.
 
 ## [Unreleased]
 ### Added
+- **Knowledge-graph read-path intelligence.** The `context` subcommand gains request-aware
+  relevance ranking (`--term`, repeatable, and `--request-file`: deterministic lexical
+  overlap — title ×3, tags ×2, body ×1 — that **reorders but never filters**, so the
+  recency floor survives an off-target term list; entries gain a `relevance` field and the
+  result echoes the `terms` used) and component-scoped buckets (`--component`, repeatable:
+  per-slug decisions/patterns/domain whose managed links region names the component,
+  capped 5 per type). The controller passes 5–8 salient request terms at Phase 0 and
+  surfaces `relevance > 0` decisions to the Iron Council under a "prior decisions that may
+  bear on this request" framing (the helper surfaces candidates; the council judges
+  contradiction), and at each wave boundary makes ONE component-scoped `context` call
+  (union of the wave's slices' `subsystems`) to inject a small `## Prior knowledge for
+  this slice (knowledge graph)` section into each slice's dispatch prompt — slice workers
+  still never touch the vault. No terms/components → byte-identical prior output (pinned
+  by test); no new config keys; read path stays fail-open and never gates intake.
 - **Native PR-review library (pr-review-toolkit decomposed in).** The aspect-based PR
   review the loop ran through the external `pr-review-toolkit` plugin now ships natively,
   with feature parity, as 1 skill + 1 command + 6 agents: the `review-pr` skill (the

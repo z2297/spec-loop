@@ -328,8 +328,13 @@ duplicating it), so Obsidian's graph view becomes a navigable map of your codeba
   prior-knowledge summary from the vault (existing patterns — including ones learned in
   *other* repos — plus this repo's active decisions and domain notes) into the run's
   conventions summary, so councils and slice workers see what earlier runs established.
-  Notes are scrubbed by a deterministic secret-redaction floor before they ever reach the
-  vault.
+  The summary is **request-aware**: entries are ranked by deterministic lexical relevance
+  to the request (reordering only — nothing is filtered out), prior decisions that may
+  bear on the request are surfaced to the Iron Council for a conflict check, and at each
+  wave boundary the controller pre-fetches **component-scoped** prior knowledge into the
+  dispatch prompt of each slice that touches those components (workers still never read
+  the vault themselves). Notes are scrubbed by a deterministic secret-redaction floor
+  before they ever reach the vault.
 
 ## Components
 
