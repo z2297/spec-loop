@@ -15,24 +15,23 @@ The risk tier is written into the plan's metadata header by the slice worker dur
 
 ### Tier 1 — Low risk
 Docs, config, comments, isolated pure functions, no behavioral surface.
-- Run: `pr-review-toolkit:review-pr code`
+- Run: `spec-loop:review-pr code`
 - Mode: sequential
 - Blocking bar: **P0 blocks.** P1/P2 logged, not blocking.
 - Council: **reduced** — `iron-council-pragmatist` + `iron-council-guardian`.
 
 ### Tier 2 — Standard (default)
 Normal feature logic, internal modules, no auth/data/contract surface.
-- Run: `pr-review-toolkit:review-pr` (default — auto-selects aspects from the diff: adds test/comment/error/type analyzers when those files change)
+- Run: `spec-loop:review-pr` (default — auto-selects aspects from the diff: adds test/comment/error/type analyzers when those files change)
 - Mode: sequential (or `all parallel` if the diff is large)
 - Blocking bar: **P0 and P1 block.** P2 logged.
 - Council: **full five.**
 
 ### Tier 3 — High risk
 Authentication/authorization, persistence/migrations, error-handling paths, public APIs, exported types, security-sensitive or external-integration code.
-- Run: ALL aspects, forced regardless of file types — i.e. `pr-review-toolkit:review-pr all parallel`, which always includes `silent-failure-hunter`, `type-design-analyzer`, and `pr-test-analyzer`.
-- **Alternative:** invoke the user's own `/exhaustive-pr-review:exhaustive-pr all parallel` for zero-missed-findings depth (reports P0–P3, all agents always run).
+- Run: `spec-loop:review-pr exhaustive` — ALL review aspects forced regardless of file types (always includes `spec-loop:silent-failure-hunter`, `spec-loop:type-design-analyzer`, and `spec-loop:pr-test-analyzer`), agents dispatched in parallel, findings reported on the P0–P3 scale (see `spec-loop:review-pr` for the exhaustive-mode contract).
 - Mode: parallel
-- Blocking bar: **P0 and P1 block.** P2 logged.
+- Blocking bar: **P0 and P1 block.** P2/P3 logged.
 - Council: **full five at high effort** (see below).
 
 ## Risk tier → council composition (pre-execution plan review, slice Step 1.5)
@@ -65,7 +64,7 @@ already ran is not re-convened.
 ## Code-simplifier polish pass (all tiers)
 
 Regardless of tier, every slice runs `code-simplifier` as a final polish pass —
-`pr-review-toolkit:review-pr simplify` against the slice diff — **after** the main
+`spec-loop:review-pr simplify` against the slice diff — **after** the main
 review and auto-fix loop have converged (findings below the blocking bar, no open
 escalation). This generalizes what Tier 3 previously did inline: `code-simplifier`
 is not part of the default `review-pr` run or `all`, so it must be requested
@@ -100,7 +99,7 @@ A `--risk-floor` argument on `/spec-loop` raises the minimum tier for the whole 
 
 After review, the slice worker compares findings against the tier's blocking bar:
 - Findings at/above the bar are **adversarially verified first** (slice Step 3b): one `review-finding-verifier` per finding (cap 6/round, highest severity first) tries to REFUTE it against the actual code. REFUTED findings are logged to `decisions-log.md` with their file:line evidence and never enter the fix loop; CONFIRMED findings (including any with an unreadable verdict — fail closed) proceed. Re-reviews verify only new findings.
-- CONFIRMED findings at/above the bar (BLOCK / FIX) → enter the auto-fix loop (apply fixes via `superpowers:receiving-code-review` discipline, re-review). Default budget: 2 attempts.
+- CONFIRMED findings at/above the bar (BLOCK / FIX) → enter the auto-fix loop (apply fixes via `spec-loop:code-review-discipline` (Part 2 — receiving feedback) discipline, re-review). Default budget: 2 attempts.
 - After the budget is exhausted and CONFIRMED findings remain at/above the bar → consult `escalation-gate` (trigger: review-block) and return `NEEDS_DECISION`.
 - Findings below the bar → record in `decisions-log.md`, do not block (they are not verified — they cost nothing).
 
@@ -108,7 +107,7 @@ After review, the slice worker compares findings against the tier's blocking bar
 
 Prepend to each slice plan, just under the title:
 ```
-<!-- spec-loop: risk-tier=<1|2|3> council="<member,member,...>" review="<exact review-pr command>" simplify="pr-review-toolkit:review-pr simplify" blocking-bar="<P0 | P0,P1>" surface="<files/subsystems touched>" -->
+<!-- spec-loop: risk-tier=<1|2|3> council="<member,member,...>" review="<exact review-pr command>" simplify="spec-loop:review-pr simplify" blocking-bar="<P0 | P0,P1>" surface="<files/subsystems touched>" -->
 ```
 `council` is the tier-mapped composition from the section above (e.g.
 `council="pragmatist,guardian"` for Tier 1) — the slice worker dispatches exactly

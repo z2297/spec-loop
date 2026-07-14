@@ -10,11 +10,11 @@ description: Use when running the spec-loop autonomously and about to stop, ask 
 This is the single decision procedure every spec-loop layer (controller, slice worker, and any skill they invoke) MUST run **before stopping or asking the human anything**. Its job is to keep the loop autonomous by default and interrupt the human **only** when a decision genuinely cannot be made.
 
 This contract **intentionally overrides** the built-in human checkpoints of the chained skills:
-- `superpowers:brainstorming`'s "ask one question at a time + require design approval" → replaced by this gate.
-- `superpowers:subagent-driven-development`'s consent-before-`main` and BLOCKED→human escalation → satisfied by always working in a worktree and routing through this gate.
-- `pr-review-toolkit:review-pr`'s BLOCK MERGE surfacing → routed through this gate after the auto-fix loop.
+- `spec-loop:brainstorming`'s "ask one question at a time + require design approval" → replaced by this gate.
+- `spec-loop:subagent-driven-development`'s consent-before-`main` and BLOCKED→human escalation → satisfied by always working in a worktree and routing through this gate.
+- A `spec-loop:review-pr` finding at/above the slice's blocking bar (per `spec-loop:review-depth-map`) → routed through this gate after the auto-fix loop.
 
-`superpowers:verification-before-completion` is **NOT** overridden — it remains a hard, no-human gate (evidence before any completion claim).
+`spec-loop:verification-before-completion` is **NOT** overridden — it remains a hard, no-human gate (evidence before any completion claim).
 
 ## The decision procedure
 
@@ -36,7 +36,7 @@ Do NOT act. Write an escalation entry (format below) and return control:
 
 1. **Genuine ambiguity** — there are ≥2 valid interpretations that materially change scope or behavior, and the codebase/spec cannot resolve which is intended.
 2. **Material assumption** — you would be assuming something non-trivial that affects behavior, scope, public contracts, persisted data, security, or external integrations. (Per the user's global CLAUDE.md, material assumptions must be stated and confirmed — not silently made.)
-3. **Unfixable review BLOCK** — `review-pr` still returns BLOCK MERGE after the auto-fix loop has exhausted its attempt budget.
+3. **Unfixable review BLOCK** — CONFIRMED `review-pr` findings at/above the slice's blocking bar (set by `spec-loop:review-depth-map`) survive after the auto-fix loop has exhausted its attempt budget.
 4. **Council objection** — the `iron-council` deems a request or plan **unworthy**: a majority of members OBJECT, or any single member raises a `SAFETY` OBJECT (irreversible data loss, security hole, broken public contract). Lesser council concerns (ENDORSE_WITH_CONCERNS, minority non-safety objections) are folded in and logged — they do **not** surface.
 5. **Unfixable quality-gate block** — the `quality-gate` skill's metrics still exceed the configured thresholds after its bounded, behavior-preserving refactor loop has exhausted its attempt budget (trigger: `quality-gate-block`). Thresholds are never weakened to avoid this.
 

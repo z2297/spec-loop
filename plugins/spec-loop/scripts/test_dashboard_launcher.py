@@ -8,7 +8,8 @@ exact argv sequences (and their security invariants) are asserted without ever
 touching docker. Mirrors the argv-recording + shell-free patterns in
 ``test_pr_resolver.py``.
 
-Covers TDD steps 1-8 from docs/superpowers/plans/2026-06-30-s3.md:
+Covers the launcher's TDD steps 1-8 (slice s3 of the 20260629-docker-dashboard
+run; see docs/spec-loop/20260629-docker-dashboard/slice-s3-report.md):
   1. constants (DEFAULT_PORT mirrored) + parse_daemon_available/fallback.
   2. registry read/write round-trip + prune_stale (both drop reasons).
   3. desired_roots union/sort/realpath-dedup.

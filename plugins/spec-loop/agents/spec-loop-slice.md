@@ -21,7 +21,7 @@ via the Task tool) MUST use `run_in_background: false`. Never set it to true.
 This **overrides any global "always run agents in background" preference** — that
 preference applies only to the top-level controller, which is the one that
 backgrounded you. Synchronous dispatch is also exactly what
-`superpowers:subagent-driven-development` requires: it runs tasks sequentially,
+`spec-loop:subagent-driven-development` requires: it runs tasks sequentially,
 one implementer at a time, never parallel. So synchronous is both mandatory and
 correct here. If you ever catch yourself about to background a sub-agent, stop and
 use `run_in_background: false`.
@@ -58,7 +58,7 @@ use `run_in_background: false`.
   you convene, from your risk tier.
 - `quality-gate` — the objective, post-review quality bar (Step 4c). Reads the
   config above; drives a bounded, behavior-preserving refactor loop.
-- `superpowers:verification-before-completion` — hard gate; never claim DONE
+- `spec-loop:verification-before-completion` — hard gate; never claim DONE
   without fresh test/build evidence.
 
 ## Execution flow
@@ -71,7 +71,7 @@ Working in a worktree also satisfies subagent-driven-development's
 consent-before-main rule without a human, and isolates you from sibling slices
 running in parallel.
 
-Drive `superpowers:using-git-worktrees` — do NOT hand-roll `git worktree add`
+Drive `spec-loop:using-git-worktrees` — do NOT hand-roll `git worktree add`
 unless that skill's fallback tells you to. Pass it **declared preferences** so it
 never prompts (you run in the background and cannot answer a prompt):
 - Consent: **granted** (the controller already decided you work in a worktree).
@@ -109,13 +109,13 @@ Do ALL subsequent steps inside this worktree.
 ### Step 1. Plan (small and targeted)
 First read the run's `conventions.md` (path in your inputs): prefer the helpers and
 patterns it names over inventing new ones, and skip broad exploration for anything
-it already answers. Then invoke `superpowers:writing-plans` to produce a plan at
-`docs/superpowers/plans/<date>-<slice-id>.md` scoped to THIS slice only — not the
+it already answers. Then invoke `spec-loop:writing-plans` to produce a plan at
+`docs/spec-loop/plans/<date>-<slice-id>.md` scoped to THIS slice only — not the
 whole request. Keep it small: bite-sized TDD steps, no placeholders.
 Then prepend the `review-depth-map` metadata header recording your risk tier,
 the council composition (`council="..."`, mapped from your tier), the exact
 `review-pr` command, the `simplify` command
-(`pr-review-toolkit:review-pr simplify`), the blocking bar, and the surface touched.
+(`spec-loop:review-pr simplify`), the blocking bar, and the surface touched.
 
 ### Step 1.5. Iron Council plan review (before any execution)
 Before you execute a single task, convene the Iron Council on the plan you just
@@ -175,18 +175,18 @@ slice is the same escalation it has always been.
 If the slice is correctly sized, proceed to Step 2.
 
 ### Step 2. Execute (task-by-task)
-Prefer `superpowers:subagent-driven-development`: dispatch a fresh implementer
-subagent per task, with per-task spec+quality review and fix loops. That skill
-ships helper scripts (`task-brief`, `review-package`) and references them relative
-to its own install location — invoke the skill and follow its instructions rather
-than hardcoding any path. (If you ever need to locate them manually, glob
-`~/.claude/plugins/cache/*/superpowers/*/skills/subagent-driven-development/scripts/`
-rather than assuming a version number.) Implementers use
-`superpowers:test-driven-development`.
+Prefer `spec-loop:subagent-driven-development`: dispatch a fresh
+`spec-loop:sdd-implementer` per task, with a per-task `spec-loop:sdd-task-reviewer`
+spec+quality review and fix loops, per that skill's dispatch contracts. The skill's
+bundled helper scripts live at
+`${CLAUDE_PLUGIN_ROOT}/skills/subagent-driven-development/scripts/` (`sdd-workspace`,
+`task-brief`, `review-package`) — invoke the skill and follow its instructions
+rather than restating them here. Implementers use
+`spec-loop:test-driven-development`.
 
 **Fallback:** if you cannot dispatch nested subagents in this context, fall back
-to `superpowers:executing-plans` and implement the tasks inline, sequentially —
-this is the superpowers-sanctioned fallback when subagents are unavailable. Still
+to `spec-loop:executing-plans` and implement the tasks inline, sequentially —
+that skill is the sanctioned inline fallback when subagents are unavailable. Still
 follow TDD and verify each step.
 
 Handle implementer statuses per subagent-driven-development (DONE,
@@ -196,9 +196,11 @@ assumption or ambiguity) → write to `escalations.md` → return `NEEDS_DECISIO
 
 ### Step 3. Scoped review
 Run the exact `review-pr` command from your plan header (set by `review-depth-map`)
-against this slice's diff. For Tier 3 you may instead invoke
-`/exhaustive-pr-review:exhaustive-pr all parallel` for maximum coverage.
-Regardless of which review path you take here, the `code-simplifier` polish pass
+against this slice's diff, following the `spec-loop:review-pr` skill's workflow.
+Resume compatibility: if an existing plan header still names
+`pr-review-toolkit:review-pr <args>` (written before the review library was native),
+execute it as the equivalent `spec-loop:review-pr <args>`.
+Regardless of which review depth your plan chose, the `code-simplifier` polish pass
 (Step 4b) still runs once the auto-fix loop converges.
 
 ### Step 3b. Verify blocking findings (adversarial, before any fixing)
@@ -220,8 +222,8 @@ single finding, the slice diff refs (base..head), and the worktree path:
 
 ### Step 4. Auto-fix loop (bounded)
 Compare the **CONFIRMED** findings to your blocking bar:
-- At/above the bar → apply fixes with `superpowers:receiving-code-review`
-  discipline (verify each suggestion against the code; push back in the
+- At/above the bar → apply fixes with `spec-loop:code-review-discipline`
+  (Part 2 — receiving feedback) discipline (verify each suggestion against the code; push back in the
   decisions log if a finding is wrong for this codebase), then re-review.
   Budget: 2 attempts (or as instructed).
 - Budget exhausted with findings still at/above the bar → `escalation-gate`
@@ -231,7 +233,7 @@ Compare the **CONFIRMED** findings to your blocking bar:
 ### Step 4b. Simplify polish pass (all tiers)
 Once the review has converged (findings below the blocking bar, no open escalation),
 run the `simplify` command from your plan header
-(`pr-review-toolkit:review-pr simplify`) against this slice's diff. `code-simplifier`
+(`spec-loop:review-pr simplify`) against this slice's diff. `spec-loop:code-simplifier`
 applies its own clarity/maintainability fixes. This pass is **non-blocking**: record
 a one-line note in `decisions-log.md`; never escalate or block on it. Step 5
 verification is the safety net — the full test/build run must still pass afterward.
@@ -253,7 +255,7 @@ configured thresholds.
   edit the config to force a pass.
 
 ### Step 5. Verify & finish (do NOT self-merge in single-branch mode)
-Enforce `superpowers:verification-before-completion`: run the full test/build
+Enforce `spec-loop:verification-before-completion`: run the full test/build
 command fresh and read the output. Proceed only with passing evidence. How you
 finish depends on `merge_mode`:
 
@@ -265,7 +267,7 @@ finish depends on `merge_mode`:
   Skip `finishing-a-development-branch` entirely here; self-merging would race with
   sibling slices landing on the same branch and is what this mode exists to prevent.
 - **`per-slice-pr` mode (only when the controller passes it).** Use
-  `superpowers:finishing-a-development-branch` and choose **push + open a PR**,
+  `spec-loop:finishing-a-development-branch` and choose **push + open a PR**,
   passing that as a declared preference (you run in the background and cannot answer a
   prompt). Never fall back to a local merge in this mode.
 

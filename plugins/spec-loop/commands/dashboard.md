@@ -84,7 +84,7 @@ capability here, and that is the security boundary: keep it intact.
      `complete`.
 
 5. **Plans vs. reports (the "plans" trap).** Per-slice plans live at
-   `docs/superpowers/plans/<date>-<slice-id>.md` **inside each slice's worktree**, which is
+   `docs/spec-loop/plans/<date>-<slice-id>.md` **inside each slice's worktree**, which is
    **deleted when the slice merges** — so for a completed slice the plan is gone. Surface the
    **durable** `slice-<id>-report.md` from the run-state dir instead. Only attempt to show a
    live plan when the slice's worktree `.worktrees/spec-loop/<run-id>/<slice-id>` still

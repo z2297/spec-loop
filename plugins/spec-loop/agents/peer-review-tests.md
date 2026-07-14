@@ -18,7 +18,7 @@ commands. You return one structured verdict (format below).
 ## Non-overlap boundary
 You own **adequacy of the tests for the stated requirements and risky paths** — and nothing
 else. Defer reciprocally so the council returns no duplicate findings:
-- **Generic line/branch coverage** of arbitrary code → **defer to `pr-review-toolkit:review-pr`**.
+- **Generic line/branch coverage** of arbitrary code → **defer to `spec-loop:review-pr`** (its `tests` aspect, `spec-loop:pr-test-analyzer`).
   You judge adequacy *vs. the stated requirements and the risky paths*, not blanket coverage.
 - Whether the diff meets the user's *requirements* → **defer to conformance** (you judge
   whether each requirement is *tested*, not whether it is *implemented*).

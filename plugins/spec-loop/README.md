@@ -26,13 +26,13 @@ when it genuinely cannot decide.
   whole* (full suite on the integration base + a cross-slice review of the cumulative
   diff), catching contract drift and same-wave merge incompatibilities that a
   per-slice review structurally can't see. Failures are remediated by a normal slice.
-- **Per slice:** `superpowers:writing-plans` → **Iron Council plan review**
-  (`iron-council`) → `superpowers:subagent-driven-development`
+- **Per slice:** `spec-loop:writing-plans` → **Iron Council plan review**
+  (`iron-council`) → `spec-loop:subagent-driven-development`
   (falls back to `executing-plans` if nested subagents aren't available) →
-  `pr-review-toolkit:review-pr` scoped to the plan's risk tier → **adversarial
+  `spec-loop:review-pr` scoped to the plan's risk tier → **adversarial
   verification of every blocking finding** (a `review-finding-verifier` tries to
   refute each one against the actual code, so hallucinated findings never burn fix
-  cycles) → a bounded auto-fix loop → `superpowers:verification-before-completion` →
+  cycles) → a bounded auto-fix loop → `spec-loop:verification-before-completion` →
   hand the verified branch back to the controller.
 - **Deterministic guardrails** — a bundled PreToolUse hook (`spec_loop_guard.py`)
   mechanically enforces the loop's git invariants while a run is active: no mid-run
@@ -67,20 +67,15 @@ when it genuinely cannot decide.
   Escalations are batched at wave boundaries so background work never blocks your
   terminal.
 
-## Requirements (install these first)
+## Requirements
 
-This plugin **depends on two other plugins** — Claude Code does not auto-install
-them, so the consumer must add them:
-
-```
-/plugin marketplace add anthropics/claude-plugins-official
-/plugin install superpowers@claude-plugins-official
-/plugin install pr-review-toolkit@claude-plugins-official
-```
-
-Optional, used only for high-risk (Tier 3) reviews: a plugin providing
-`/exhaustive-pr-review:exhaustive-pr`. If absent, the loop uses
-`pr-review-toolkit:review-pr all parallel` instead.
+The plugin has **zero external plugin dependencies**. Both the development-process
+skill library the loop chains (planning, TDD execution, verification, code-review
+discipline, worktrees, branch finishing) and the PR-review library (the
+`spec-loop:review-pr` skill, its `/spec-loop:review-pr` command, and six review
+agents) ship **natively inside this plugin** — see
+[Process skill library](#process-skill-library) below. High-risk (Tier 3) reviews
+use the native `spec-loop:review-pr exhaustive` mode.
 
 **Runtime tooling for the auxiliary commands** (the core loop needs none of this —
 its worktrees run on the host). These scripts ship *inside* the plugin and are
@@ -200,8 +195,8 @@ What happens:
 - You answer (e.g. "dual-validate cookie + JWT during a 2-week overlap"); the controller
   injects the decision and proceeds — **without re-convening the council on a question
   you've already settled.**
-- Tier 3 slices run the deepest review (`review-pr all parallel`, or
-  `/exhaustive-pr-review:exhaustive-pr` if installed). Any further escalations batch at
+- Tier 3 slices run the deepest review (`spec-loop:review-pr exhaustive` — all
+  review agents forced, P0–P3 reporting). Any further escalations batch at
   **wave boundaries**, never one-at-a-time.
 - Interrupted? `--resume <run-id>` skips completed slices and continues. Illustrates the
   full machinery: flags, tiered review, the council's hard stop, batched escalation, and
@@ -345,7 +340,8 @@ duplicating it), so Obsidian's graph view becomes a navigable map of your codeba
 | command | `knowledge-graph` | View/update the global Obsidian knowledge-graph config — vault path, node types, write mode (`/spec-loop:knowledge-graph`) |
 | command | `dashboard`       | Read-only terminal-markdown view of a run — **stage-aware** (Iron Council findings, per-slice execution DAG, final-review Executive Readout) with a static all-status escalations section (`/spec-loop:dashboard [run-id]`) |
 | command | `dashboard-serve` | Start a local read-only **web** dashboard — a dark-theme single-page UI whose run detail is a **stage pipeline** (Iron Council → Execution → Final Review) with a specific view per stage and a pinned escalations panel, over the same run artifacts (`/spec-loop:dashboard-serve [--port N] [--root PATH]`) |
-| command | `peer-review`     | Strictly read-only multi-provider peer-review loop — resolve a real PR (GitHub/Azure DevOps/Bitbucket URL or local `--base/--head`), convene the five `peer-review-*` reviewers + a report-only `pr-review-toolkit` pass via `peer-review-council`, and publish one report under `docs/pr-review/<review-id>/`; never edits, merges, or posts (`/spec-loop:peer-review <requirements> --pr <url>`) |
+| command | `peer-review`     | Strictly read-only multi-provider peer-review loop — resolve a real PR (GitHub/Azure DevOps/Bitbucket URL or local `--base/--head`), convene the five `peer-review-*` reviewers + a report-only `spec-loop:review-pr` pass via `peer-review-council`, and publish one report under `docs/pr-review/<review-id>/`; never edits, merges, or posts (`/spec-loop:peer-review <requirements> --pr <url>`) |
+| command | `review-pr`       | Aspect-based PR review over a diff using the native review agents — thin wrapper over the `review-pr` skill (`/spec-loop:review-pr [aspects] [parallel|exhaustive]`) |
 | agent   | `spec-loop-slice` | Per-slice worker — creates a clean dedicated worktree up front, then plan→council→(split if too big)→execute→review→quality-gate→verify, and hands the committed branch back to the controller to integrate (opens its own PR only in `--per-slice-pr` mode) |
 | agent   | `peer-review-conformance` | Peer-review reviewer — judges the diff against the supplied business requirements |
 | agent   | `peer-review-correctness` | Peer-review reviewer — hunts logic errors and bugs in the diff |
@@ -363,8 +359,59 @@ duplicating it), so Obsidian's graph view becomes a navigable map of your codeba
 | skill   | `review-depth-map`| Maps a plan's risk tier to how far `review-pr` goes |
 | skill   | `quality-gate`    | Measures changed code vs thresholds; drives the behavior-preserving refactor loop |
 | skill   | `knowledge-graph` | Projects a run's decisions/patterns/context/domain into the user's Obsidian vault as linked notes that accumulate across runs (opt-in; controller + runbook only; MCP-preferred with direct-file fallback) |
-| skill   | `peer-review-council` | Convenes the five `peer-review-*` reviewers + a report-only `pr-review-toolkit` pass and aggregates them into one pinned-schema, report-only review (no fixes, no write-back) |
+| skill   | `peer-review-council` | Convenes the five `peer-review-*` reviewers + a report-only `spec-loop:review-pr` pass and aggregates them into one pinned-schema, report-only review (no fixes, no write-back) |
+| skill   | `review-pr`       | The aspect-based PR-review orchestration contract — aspect→agent map, sequential/parallel/exhaustive modes, aggregation and the canonical Critical/Important/Suggestion → P0/P1/P2 severity mapping |
 | skill   | `runbook`         | At the end of Phase 5 (gate green, before publishing) synthesizes and commits one `docs/spec-loop/<run-id>/runbook.md` from the run's durable artifacts — a self-contained Executive Readout + What Was Built, Business Logic, Gaps, requirement traceability, decisions summary, integration-gate result, and how-to-verify — and returns the Executive Readout as the run's final terminal output |
+
+### Process skill library
+
+The loop's development-process discipline ships natively (ported and adapted from
+[`superpowers`](https://github.com/obra/superpowers) v6.1.1, MIT). These skills are
+also usable interactively, outside a run:
+
+> **Deliberate divergence from superpowers:** the source plugin auto-injects its
+> skill router into every session via a `SessionStart` hook. spec-loop registers
+> no `SessionStart` hook by design — the framework stays dormant until relevant,
+> and the `spec-loop:using-spec-loop` router loads on demand via its description.
+> This keeps the plugin non-intrusive in repos where you aren't running the loop,
+> and avoids double-injection if superpowers is installed alongside. If you want
+> always-on skill-check enforcement, invoke `spec-loop:using-spec-loop` explicitly
+> at session start or add your own `SessionStart` hook that injects it.
+
+| Type  | Name | Role |
+|-------|------|------|
+| skill | `using-spec-loop` | Gateway/router — find and invoke the right skill before any response or action |
+| skill | `brainstorming` | Design exploration before any creative work — requirements, approaches, an approved spec (`docs/spec-loop/specs/`); optional zero-dep visual-companion web server |
+| skill | `writing-plans` | Turn a spec into a bite-sized, TDD-stepped implementation plan (`docs/spec-loop/plans/`) with the executor header |
+| skill | `subagent-driven-development` | Execute a plan task-by-task via fresh `sdd-implementer`/`sdd-task-reviewer` dispatches, review packages, and a durable progress ledger (`.spec-loop/sdd/`) |
+| skill | `executing-plans` | Inline, sequential plan execution — the sanctioned fallback when subagent dispatch is unavailable |
+| skill | `test-driven-development` | The Iron Law: no production code without a failing test first; red-green-refactor with mandatory verify gates |
+| skill | `systematic-debugging` | No fixes without root-cause investigation — four gated phases plus escalation after repeated failed fixes |
+| skill | `verification-before-completion` | No completion claims without fresh verification evidence — the loop's one never-overridden gate |
+| skill | `code-review-discipline` | Both directions of review behavior: requesting (dispatch `code-reviewer` with crafted context) and receiving (verify-then-apply, no performative agreement) |
+| skill | `finishing-a-development-branch` | Structured end-of-branch options (merge/PR/keep/discard) with safe worktree cleanup |
+| skill | `using-git-worktrees` | Isolated workspaces: native-tool preference, `.worktrees/` fallback with gitignore safety, clean-baseline verification |
+| skill | `dispatching-parallel-agents` | Fan out 2+ genuinely independent tasks to isolated-context agents in one response |
+| skill | `writing-skills` | Meta-skill: author/test skills with TDD discipline, trigger-first descriptions, and this repo's CI contract |
+| agent | `sdd-implementer` | Implements exactly ONE plan task with TDD, commits, self-reviews, reports to a file (dispatched by subagent-driven-development) |
+| agent | `sdd-task-reviewer` | Reviews ONE implemented task against its brief — spec compliance + code quality, "do not trust the report" (dispatched by subagent-driven-development) |
+| agent | `code-reviewer` | Whole-branch/diff reviewer against plan or requirements — used ad-hoc via code-review-discipline and as SDD's final review gate |
+
+### PR-review library
+
+The aspect-based PR review the loop runs at slice Step 3, the Phase 5 integration
+gate, and peer-review corroboration ships natively (ported and adapted from
+Anthropic's `pr-review-toolkit`, claude-plugins-official). Orchestrated by the
+`review-pr` skill / `/spec-loop:review-pr` command listed above:
+
+| Type  | Name | Role |
+|-------|------|------|
+| agent | `guideline-reviewer` | Project-guideline compliance + bug detection with confidence-scored findings (reports only ≥80/100) — the `code` aspect, runs on every review (the ported toolkit `code-reviewer`, renamed to avoid clashing with the plan-alignment `code-reviewer` above) |
+| agent | `pr-test-analyzer` | Behavioral test-coverage quality of the diff, gaps rated 1–10 by criticality — the `tests` aspect |
+| agent | `comment-analyzer` | Comment accuracy/completeness/rot analysis, advisory-only — the `comments` aspect |
+| agent | `silent-failure-hunter` | Error-handling audit: silent failures, catch-block specificity, fallback justification (CRITICAL/HIGH/MEDIUM) — the `errors` aspect |
+| agent | `type-design-analyzer` | Type invariant/encapsulation analysis on four 1–10 axes — the `types` aspect |
+| agent | `code-simplifier` | Behavior-preserving clarity/maintainability polish; the only review agent that edits code — the explicit-only, non-blocking `simplify` aspect |
 
 ## Notes & limitations
 
@@ -386,7 +433,7 @@ duplicating it), so Obsidian's graph view becomes a navigable map of your codeba
   itself is invoked from inside another agent, the controller falls back to running
   slices synchronously (no cross-slice parallelism).
 - If nested subagent dispatch is unsupported entirely in your environment, the
-  slice worker falls back to inline `superpowers:executing-plans`.
+  slice worker falls back to inline `spec-loop:executing-plans`.
 - Background agents cannot prompt you directly; that's why escalations are
   file-based and surfaced by the controller at wave boundaries.
 - This loop intentionally overrides the human approval gates in `brainstorming`

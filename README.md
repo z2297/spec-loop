@@ -44,20 +44,14 @@ If a new build is buggy, install the version-pinned entry for the last release t
 worked for you. See [`CHANGELOG.md`](CHANGELOG.md) for what changed in each version
 and the full channel reference.
 
-### Required dependencies
+### Dependencies
 
-`spec-loop` orchestrates two other plugins. Claude Code does **not** auto-install
-them, so add them too:
-
-```
-/plugin marketplace add anthropics/claude-plugins-official
-/plugin install superpowers@claude-plugins-official
-/plugin install pr-review-toolkit@claude-plugins-official
-```
-
-> Optional: a plugin providing `/exhaustive-pr-review:exhaustive-pr` is used only for
-> high-risk (Tier 3) reviews. If absent, the loop falls back to
-> `pr-review-toolkit:review-pr all parallel`.
+None. The plugin is **fully self-contained**: the development-process skill library
+(planning, TDD execution, verification, code-review discipline, worktrees) ships
+natively — ported from [superpowers](https://github.com/obra/superpowers) (MIT) —
+and so does the PR-review library (the `review-pr` skill/command and six review
+agents, ported from Anthropic's `pr-review-toolkit`, claude-plugins-official).
+High-risk (Tier 3) reviews use the native `spec-loop:review-pr exhaustive` mode.
 
 ## Usage
 
@@ -88,8 +82,8 @@ autonomy contract, the Iron Council, components, and limitations.
 │   └── spec-loop/           # the plugin (this whole dir is what ships)
 │       ├── .claude-plugin/plugin.json
 │       ├── commands/        # /spec-loop controller, /spec-loop:quality-gate config, /spec-loop:dashboard terminal view, /spec-loop:dashboard-serve web view, /spec-loop:peer-review read-only PR review
-│       ├── agents/          # spec-loop-slice worker + 5 iron-council members + 5 peer-review-* reviewers
-│       ├── skills/          # iron-council, escalation-gate, review-depth-map, quality-gate, peer-review-council, runbook
+│       ├── agents/          # spec-loop-slice worker + 5 iron-council members + 5 peer-review-* reviewers + sdd-implementer/sdd-task-reviewer/code-reviewer
+│       ├── skills/          # loop machinery (iron-council, escalation-gate, review-depth-map, quality-gate, peer-review-council, runbook, knowledge-graph) + the native process library (using-spec-loop, brainstorming, writing-plans, subagent-driven-development, executing-plans, test-driven-development, systematic-debugging, verification-before-completion, code-review-discipline, finishing-a-development-branch, using-git-worktrees, dispatching-parallel-agents, writing-skills)
 │       ├── scripts/         # bundled runtime: dashboard_launcher.py, dashboard_server.py, pr_resolver.py, dashboard_assets/ (+ their tests)
 │       ├── Dockerfile       # read-only dashboard image (built by dashboard_launcher.py)
 │       ├── .dockerignore

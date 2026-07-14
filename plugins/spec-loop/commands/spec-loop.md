@@ -21,8 +21,10 @@ because you are the only layer that can interactively ask the human anything.
 
 - **REQUIRED SUB-SKILL:** `escalation-gate` governs every decision to stop or ask
   the human. Invoke it and follow it exactly. Default is proceed-and-log; surface
-  to the human ONLY on (1) genuine ambiguity, (2) a material assumption, or
-  (3) a review BLOCK that survived the auto-fix loop.
+  to the human ONLY on (1) genuine ambiguity, (2) a material assumption, (3) a
+  review BLOCK that survived the auto-fix loop, (4) an Iron Council objection, or
+  (5) a quality-gate block that survived the refactor loop — `escalation-gate` is
+  authoritative on all five triggers.
 - **REQUIRED SUB-SKILL:** `review-depth-map` decides how far each slice's review
   goes, based on the slice's risk tier.
 - **REQUIRED SUB-SKILL:** `iron-council` convenes an adversarial council that
@@ -52,9 +54,9 @@ because you are the only layer that can interactively ask the human anything.
   slice worker, so it does not touch the parallel hot path. Ensure its config exists in Phase 0
   (batched with the quality-gate first-run setup); if disabled, say nothing and skip every
   knowledge-graph step below.
-- This loop **intentionally overrides** the human gates in `brainstorming` and
-  `subagent-driven-development`. It does NOT override
-  `superpowers:verification-before-completion`.
+- This loop **intentionally overrides** the human gates in `spec-loop:brainstorming`
+  and `spec-loop:subagent-driven-development`. It does NOT override
+  `spec-loop:verification-before-completion`.
 - Slice workers run in the **background** so the terminal is never blocked.
 - **Single-branch integration (default).** Every slice merges into ONE dedicated
   local **integration branch** — never `main`/`master` directly, and never as its
@@ -71,21 +73,14 @@ because you are the only layer that can interactively ask the human anything.
   as a feature branch (optionally opening a PR) or merge it onto `main` (Phase 5).
   The loop does not push or touch `main` until you choose.
 
-## Preflight — required plugins
+## Preflight — self-contained
 
-This loop chains skills from two other plugins. Before doing anything, confirm
-both are installed and enabled (e.g. `claude plugin list`):
-- `superpowers` (provides writing-plans, subagent-driven-development,
-  executing-plans, using-git-worktrees, receiving-code-review,
-  verification-before-completion, finishing-a-development-branch).
-- `pr-review-toolkit` (provides review-pr). `exhaustive-pr-review` is optional,
-  used only for Tier 3.
-
-If either is missing, STOP and tell the human exactly what to install
-(`/plugin marketplace add anthropics/claude-plugins-official` then
-`/plugin install superpowers@claude-plugins-official` and
-`/plugin install pr-review-toolkit@claude-plugins-official`). Do not try to
-proceed without them.
+The plugin is fully self-contained: the development-process skills the loop chains
+(writing-plans, subagent-driven-development, executing-plans, using-git-worktrees,
+code-review-discipline, verification-before-completion,
+finishing-a-development-branch) AND the PR-review library (the `spec-loop:review-pr`
+skill and its six review agents) all ship **inside this plugin** — no external
+plugin dependency exists, and no preflight plugin check is needed.
 
 ## Phase 0 — Intake & decompose
 
@@ -264,7 +259,7 @@ background dispatch to work below depth 1.
    - `NEEDS_DECISION` → leave it `pending`; its escalation is in `escalations.md`.
    - `BLOCKED` → leave it `pending`; treat its blocker as an escalation too.
 2. Verify each `DONE` claim independently before trusting it
-   (`superpowers:verification-before-completion`): check the worktree's git log /
+   (`spec-loop:verification-before-completion`): check the worktree's git log /
    diff and test evidence in the slice's report. If a slice claims DONE without
    evidence, treat it as `NEEDS_DECISION`.
 3. **Ingest splits (dynamic decomposition).** For each slice that returned `SPLIT`,
@@ -289,7 +284,7 @@ background dispatch to work below depth 1.
      `base_ref` in the main worktree, take each verified `DONE` slice **one at a time,
      never concurrently** and merge its branch:
      `git merge --no-ff spec-loop/<run-id>/<slice-id>`. After a clean merge, remove
-     the slice's worktree and delete its branch (`superpowers:using-git-worktrees`
+     the slice's worktree and delete its branch (`spec-loop:using-git-worktrees`
      cleanup, i.e. `git worktree remove` then `git branch -d`). A merge **conflict**
      is an integration failure → do not force it; open a **remediation slice**
      (Phase 5's procedure) scoped to reconciling the two slices, and leave the
@@ -298,7 +293,7 @@ background dispatch to work below depth 1.
      skip (a) and defer verification to Phase 5.4's throwaway integration branch.)*
    - **(b) Per-wave integration check (lightweight).** With the wave merged, run the
      project's full test/build **fresh on `base_ref`** and read the output
-     (`superpowers:verification-before-completion` discipline). This catches same-wave
+     (`spec-loop:verification-before-completion` discipline). This catches same-wave
      merge incompatibilities and cross-slice drift *early*, while remediation is cheap
      — two slices in one wave both branched from the same tip and merged blind to each
      other. Green → continue. Red → open a **remediation slice** (Phase 5's procedure)
@@ -338,7 +333,7 @@ verified the slices **together**. This phase does, before the run is called comp
 1. **Full test/build on `base_ref`.** Run the project's complete test and build
    suite fresh on `base_ref` (which now contains every merged slice) and read the
    output. This is the assembled whole, not any single slice's worktree.
-2. **Cross-slice integration review.** Run ONE synchronous `pr-review-toolkit:review-pr`
+2. **Cross-slice integration review.** Run ONE synchronous `spec-loop:review-pr`
    over the **cumulative diff** `base_sha..HEAD` of `base_ref`, at the run's **highest
    slice risk tier** (via `review-depth-map`). Scope it to integration concerns:
    contract consistency across slices (a signature one slice changed and another

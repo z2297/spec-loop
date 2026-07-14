@@ -1,5 +1,5 @@
 ---
-description: "Run the read-only peer-review loop: resolve a real PR (or local ref-range), convene the five peer-review reviewers plus a report-only pr-review-toolkit pass against its diff and the supplied business requirements, and publish ONE pinned-schema review report under docs/pr-review/<review-id>/ — never edits, merges, or posts anything"
+description: "Run the read-only peer-review loop: resolve a real PR (or local ref-range), convene the five peer-review reviewers plus a report-only spec-loop:review-pr pass against its diff and the supplied business requirements, and publish ONE pinned-schema review report under docs/pr-review/<review-id>/ — never edits, merges, or posts anything"
 argument-hint: "<requirements-prompt> --pr <ado|github|bitbucket PR url> | --base <ref> --head <ref>"
 allowed-tools: ["Bash", "Glob", "Grep", "Read", "Task", "Write"]
 ---
@@ -10,7 +10,7 @@ Run the `/spec-loop:peer-review` loop: take a set of **business requirements** a
 **real pull request** (already written code) — a GitHub / Azure DevOps / Bitbucket PR
 URL, or an explicit local `--base/--head` ref-range — resolve and materialize its diff
 **read-only**, convene the five `peer-review-*` reviewers plus a report-only
-`pr-review-toolkit:review-pr` pass via the `peer-review-council` skill, and **write a
+`spec-loop:review-pr` pass via the `peer-review-council` skill, and **write a
 single review report** in the council's pinned schema.
 
 This command **CHANGES NO IMPLEMENTATION.** It is the read-only counterpart to the
@@ -105,7 +105,7 @@ Keep this `allowed-tools` set and this prose intact: they are the boundary.
    Hand the skill the resolved record + materialized diff (Step 2) and the requirements
    prompt (Step 1), and follow its read-only procedure:
    - **Pick depth** via the `review-depth-map` skill (proportionate to the diff's
-     risk/surface), then run `pr-review-toolkit:review-pr` in **REPORT-ONLY** mode — never
+     risk/surface), then run `spec-loop:review-pr` in **REPORT-ONLY** mode — never
      the `simplify` aspect and never any fix/apply behavior (those write code).
    - **Convene the five reviewers in a single message** — `peer-review-conformance`,
      `-correctness`, `-risk`, `-design`, `-tests` — passing each the requirements prompt +

@@ -23,6 +23,44 @@ prior build. Pinned entries map to git tags `v<version>`.
 
 ## [Unreleased]
 ### Added
+- **Native PR-review library (pr-review-toolkit decomposed in).** The aspect-based PR
+  review the loop ran through the external `pr-review-toolkit` plugin now ships natively,
+  with feature parity, as 1 skill + 1 command + 6 agents: the `review-pr` skill (the
+  orchestration contract — aspect→agent map, diff-driven aspect auto-selection,
+  sequential/parallel modes, aggregation buckets, and the canonical
+  Critical/Important/Suggestion → P0/P1/P2 severity mapping, moved here from
+  `peer-review-council`), the thin `/spec-loop:review-pr` command wrapper, and agents
+  `guideline-reviewer` (the source's `code-reviewer`, renamed to avoid clashing with the
+  native plan-alignment `code-reviewer`; confidence-scored ≥80 findings),
+  `pr-test-analyzer`, `comment-analyzer`, `silent-failure-hunter` (Anthropic-internal
+  logging references generalized to target-repo discovery), `type-design-analyzer`, and
+  `code-simplifier` (source project standards demoted to fallbacks behind the target
+  repo's own conventions). New `exhaustive` mode (all five review agents forced — not
+  `code-simplifier` — parallel, P0–P3 reporting; unproven until it has runtime mileage)
+  natively replaces the optional external
+  `/exhaustive-pr-review:exhaustive-pr` for Tier 3. The `pr-review-toolkit` preflight
+  check and install instructions are removed — spec-loop now has **zero external plugin
+  dependencies**. Existing plan headers naming `pr-review-toolkit:review-pr …` are
+  executed as the equivalent `spec-loop:review-pr …` on resume. Ported and adapted from
+  `pr-review-toolkit` (Anthropic, claude-plugins-official) with per-file provenance
+  sections; source `model: opus` pins replaced with `model: inherit`.
+- **Native process skill library (superpowers decomposed in).** The development-process
+  skills the loop chained from the external `superpowers` plugin now ship natively, with
+  feature parity, as 13 skills + 3 agents: `using-spec-loop` (gateway/router),
+  `brainstorming` (+ optional zero-dep visual-companion server under
+  `skills/brainstorming/scripts/`), `writing-plans` (plans now at `docs/spec-loop/plans/`,
+  specs at `docs/spec-loop/specs/`), `subagent-driven-development` (+ bundled
+  `sdd-workspace`/`task-brief`/`review-package` scripts, ledger at `.spec-loop/sdd/`),
+  `executing-plans`, `test-driven-development` (+ testing-anti-patterns reference),
+  `systematic-debugging` (+ technique references and `find-polluter.sh`),
+  `verification-before-completion`, `code-review-discipline` (merges the source's
+  requesting- and receiving-code-review pair into one home), `finishing-a-development-branch`,
+  `using-git-worktrees`, `dispatching-parallel-agents`, `writing-skills` (adapted to this
+  repo's CI contract); plus native agents `sdd-implementer`, `sdd-task-reviewer`, and
+  `code-reviewer` replacing the source's pasted prompt templates. Ported and adapted from
+  `superpowers` v6.1.1 (github.com/obra/superpowers, MIT) with per-skill provenance
+  sections. No SessionStart hook is added — skills load on demand.
+
 - **Structured JSON contracts (fail-closed).** Iron Council members now end their replies
   with a fenced ```json verdict block, and slice workers write a machine-readable status
   sidecar (`docs/spec-loop/<run-id>/slice-<id>-status.json`) that the controller — not the
@@ -132,6 +170,19 @@ prior build. Pinned entries map to git tags `v<version>`.
   at wave boundaries appear in the Phase 5 MOC without being re-upserted.
 
 ### Changed
+- **Dependency drop: `superpowers` is no longer required.** The controller preflight,
+  slice worker, escalation-gate/quality-gate/review-depth-map skills, dashboard, and
+  READMEs now reference the native `spec-loop:*` process skills; the SDD helper scripts
+  are located via `${CLAUDE_PLUGIN_ROOT}/skills/subagent-driven-development/scripts/`
+  instead of globbing the superpowers plugin cache; slice plans move from
+  `docs/superpowers/plans/` to `docs/spec-loop/plans/`.
+- **Dependency drop: `pr-review-toolkit` is no longer required.** The controller
+  preflight no longer checks for any external plugin; `review-depth-map`,
+  `spec-loop-slice`, `peer-review-council`, `peer-review`, `escalation-gate`,
+  `code-review-discipline`, `quality-gate`, `runbook`, `peer-review-tests`, and both
+  READMEs now reference the native `spec-loop:review-pr` skill/command and
+  `spec-loop:*` review agents. Combined with the superpowers drop above, the plugin
+  has zero external plugin dependencies.
 - `escalation-gate` now lists `quality-gate-block` as its fifth surface trigger — the
   quality-gate skill and slice worker already emitted it; the enum was missing it.
 - `validate_marketplace.py` also checks `${CLAUDE_PLUGIN_ROOT}` references inside

@@ -108,12 +108,12 @@ Otherwise, for each failing item, run a refactor pass (budget =
 `refactor_attempts`, default **3**):
 
 1. **Refactor implementation only.** Apply the smallest transformation that lowers
-   the metric — lean on `code-simplifier` and the `refactor-analysis` /
+   the metric — lean on `spec-loop:code-simplifier` and the `refactor-analysis` /
    user-CLAUDE.md patterns: extract method, reduce nesting (guard clauses / early
    return), replace conditional with polymorphism, introduce parameter object, split
    a god class. **Never change observable behavior, public signatures, contracts, or
    outputs** — implementation detail only.
-2. **Keep tests green.** Follow `superpowers:test-driven-development` refactor
+2. **Keep tests green.** Follow `spec-loop:test-driven-development` refactor
    discipline: the existing tests must stay green through every pass. Re-run the
    slice's tests after each refactor; if a change reddens them or alters behavior,
    **revert that change** and try a different transformation.

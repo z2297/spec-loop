@@ -55,8 +55,9 @@ The controller hands this procedure:
 - The resolved `base_ref` (integration branch), `base_sha`, `base_branch`, and
   `merge_mode`. **Treat `base_branch` and `merge_mode` as optional** — older `dag.json`
   files omit them; default `base_branch` to `main` and `merge_mode` to `single-branch`.
-- The **Phase 5 result**: the suite/build command + outcome, the cross-slice `review-pr`
-  verdict + tier, and the ids of any remediation slices that were added.
+- The **Phase 5 result**: the suite/build command + outcome, the cross-slice
+  `spec-loop:review-pr` verdict + tier, and the ids of any remediation slices that
+  were added.
 - The **publish choice if already made** — but note the runbook is generated *before* the
   publish prompt (so it travels with the push/merge), so `publish` is normally `pending`
   at write time; the controller states the final publish outcome on the terminal echo.
