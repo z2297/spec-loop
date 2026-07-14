@@ -1,6 +1,6 @@
 ---
 name: knowledge-graph
-description: Use when the spec-loop controller reaches a phase boundary (Phase 1 start, a wave boundary, or the end-of-run runbook synthesis) and needs to record the run's decisions, architecture patterns, system context, and domain knowledge into the user's Obsidian knowledge graph — creating, referencing, and updating markdown notes with wikilinks. Opt-in and light-touch; no-ops entirely unless enabled with a vault path. Invoked only by the controller and runbook (never by slice workers).
+description: Use when the spec-loop controller reaches a phase boundary (Phase 1 start, a wave boundary, or the end-of-run runbook synthesis), or when the /spec-loop:peer-review command finishes its report and runs its doubly-opt-in post-report projection, and the caller needs to record decisions, architecture patterns, system context, domain knowledge, or a review verdict into the user's Obsidian knowledge graph — creating, referencing, and updating markdown notes with wikilinks. Opt-in and light-touch; no-ops entirely unless enabled with a vault path. Invoked only by the controller, the runbook, and the peer-review command (never by slice workers).
 ---
 
 # Knowledge Graph — accumulate a spec-loop run's knowledge into an Obsidian vault
@@ -13,12 +13,14 @@ siloed per run. This skill **projects it into a persistent Obsidian knowledge gr
 markdown note per node, linked with `[[wikilinks]]`, so decisions, architecture patterns,
 system context, and domain knowledge accumulate and cross-link across every run and repo.
 
-It is **deliberately light touch**. Only two callers ever invoke it, both in the **main
+It is **deliberately light touch**. Only three callers ever invoke it, all in the **main
 session**, never in the parallel slice hot path:
 
 - the **`/spec-loop` controller** — a few live upserts at phase boundaries (Phase 1 start;
-  each wave boundary), and
-- the **`runbook` skill** — the full synthesis at end of run (Phase 5).
+  each wave boundary),
+- the **`runbook` skill** — the full synthesis at end of run (Phase 5), and
+- the **`/spec-loop:peer-review` command** — a doubly-opt-in post-report projection of a
+  review's verdict (one `review` node; requires `"review"` in `node_types`).
 
 **Slice workers never call this skill.** They stay isolated in their worktrees, so enabling
 the graph does not affect the loop's parallel execution or throughput.
@@ -35,10 +37,13 @@ Read `~/.claude/spec-loop/knowledge-graph.json` (expand `~`). It is created only
 - If the file is **missing**, `enabled` is `false`, or `vault_path` is null/empty →
   **do nothing**, append one line to `decisions-log.md`
   (`[<phase>] KNOWLEDGE GRAPH: disabled — skipped`), and return. This is the common path;
-  it must be silent and cheap.
+  it must be silent and cheap. (When the caller is the **peer-review command** there is no
+  decisions-log — the bail path is a plain, silent return.)
 - Otherwise read `vault_path`, `subfolder` (default `spec-loop`), `write_mode`
-  (default `mcp-preferred`), and `node_types` (default all four). Only emit nodes whose
-  `type` is in `node_types`; `component` and `run` structural nodes are always allowed.
+  (default `mcp-preferred`), and `node_types` (default the four content types —
+  `review` is a fifth, **non-default** option that additionally enables the peer-review
+  post-report projection). Only emit nodes whose `type` is in `node_types`; `component`
+  and `run` structural nodes are always allowed.
 
 ## Step 2 — Node taxonomy & schema (what to record)
 
@@ -52,6 +57,7 @@ One note per node under `<vault_path>/<subfolder>/`, identified by `(type, id)`:
 | `component` | `Components/` | `<subsystem-slug>` (hub / link target) | on reference |
 | `pattern` | `Patterns/` | `<slug>` (accumulates, re-referenced across runs) | runbook |
 | `domain` | `Domain/` | `<repo>-<slug>` | runbook |
+| `review` | `Reviews/` | `<review-id>` (ONE per peer review) | peer-review, post-report |
 
 **Node fields** passed to the helper: `type`, `id`, `title`, `repo`, optional `summary`
 (the note's opening prose — set on first create), optional `observation` (a dated block
@@ -59,7 +65,14 @@ appended on every run — this is how a node *updates* across runs), optional `l
 node ids → `[[wikilinks]]`), optional `index` (a managed snapshot region replaced wholesale
 on every upsert — used by the run MOC's grouped listing; you normally never set it directly),
 and for decisions optional `status` (`active`/`superseded`) and `reversibility`
-(`trivial`/`moderate`/`high`).
+(`trivial`/`moderate`/`high`). Review nodes additionally carry `verdict`
+(`APPROVE`/`APPROVE_WITH_COMMENTS`/`REQUEST_CHANGES`).
+
+**`runs` semantics.** The `runs` frontmatter list records **writer ids** — spec-loop
+run-ids and peer-review review-ids alike (the field name is kept for schema stability). A
+review batch sets its payload `run_id` to the `<review-id>`, so the touched `system` hub
+accrues review-ids next to run-ids, deduped and idempotent. Review ids are unique per
+review (like run ids): they are never remap-eligible and never appear in `known_ids`.
 
 **Edges** (as `links`): a `decision` links to the `component`(s) it affects, the `pattern`(s)
 it applies, and the repo's `system`; a `pattern`/`domain` links to the `component`(s) it
@@ -144,6 +157,14 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/knowledge_graph.py" query --vault <path> 
   upsert `pattern` and `domain` nodes, any remaining `decision`s, the `component` hubs, then
   **finalize the `run` MOC** linking everything. Record a `knowledge_graph` block in the
   runbook front-matter (`{ vault, subfolder, nodes_written, errors }`) for traceability.
+- **Peer-review command, post-report (doubly opt-in):** only when `"review"` is in the
+  configured `node_types`, and strictly after the review report and verdict are final. One
+  `batch` call, payload `run_id` = the `<review-id>`, upserting a **single `review` node**
+  (verdict, one-line summary, an observation with severity counts and ≤10 P0/P1 finding
+  titles — never P2s, evidence, requirement text, or diff hunks) linked to
+  `system/<repo-slug>` and to **already-existing** `component` hubs only (query first;
+  never create components from a review), plus a touch-upsert of the `system` hub. No MOC,
+  no MCP enrichment (budget 0) — write `direct`-style regardless of `write_mode`.
 
 Keep observations **concise** (a sentence or two) — the graph is an index of knowledge, not a
 transcript. The exhaustive record stays in `docs/spec-loop/<run-id>/`.
@@ -217,6 +238,11 @@ above stays the first line of defense.
   Iron Council judges whether a surfaced prior decision actually contradicts the request.
 - **Fetching slice context from inside a slice worker** — the controller pre-fetches
   component-scoped context once per wave and injects it; workers never touch the vault.
+- **Writing report bodies, evidence, P2 findings, or diff text into a `review` node** —
+  the vault note is a bounded projection (verdict + P0/P1 titles); the published report
+  under `docs/pr-review/<review-id>/` stays the entire human surface.
+- **Creating `component` hubs from a review** — the peer-review flow lacks the run's
+  architecture context; link only components that already exist.
 
 ## Known limitations
 

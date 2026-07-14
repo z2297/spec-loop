@@ -36,10 +36,17 @@ This is the security boundary of the peer-review loop, and it is intentional:
   and `target.md` inputs, and the published `review-report.md`). `Write` is **NEVER**
   used to modify any source or plugin file, and **never** writes outside the
   `docs/pr-review/<review-id>/` tree (the write-path guard in Step 3 enforces this).
-- **`Bash` is read-only.** `Bash` runs only read-only inspection and the read-only
-  `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/pr_resolver.py"` invocation. It is **never** used to write, move,
-  delete, commit, or push, and the raw `<requirements-prompt>` / PR-URL / ref arguments
-  are **NEVER interpolated into a `Bash` command string** (see the guard in Step 2).
+- **`Bash` is read-only against the repo and the provider.** `Bash` runs only read-only
+  inspection, the read-only `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/pr_resolver.py"` invocation, and — the ONE
+  sanctioned write, mirroring the runbook's carve-out — the doubly-opt-in knowledge-graph
+  projection of Step 7, which pipes one bounded JSON batch to the plugin-bundled
+  `knowledge_graph.py` helper. That helper writes only inside the user's own configured
+  Obsidian vault (`<vault_path>/<subfolder>/`, path-contained by the script), never inside
+  this repo, never to the provider, and runs strictly after the verdict and report are
+  final, so it can influence neither. `Bash` is **never** used to write, move, delete,
+  commit, or push anything else, and the raw `<requirements-prompt>` / PR-URL / ref
+  arguments are **NEVER interpolated into a `Bash` command string** (see the guard in
+  Step 2).
 - **`Task`** is used only to convene the read-only `peer-review-*` reviewers (via the
   `peer-review-council` skill), which never edit code.
 
@@ -144,13 +151,33 @@ Keep this `allowed-tools` set and this prose intact: they are the boundary.
    (`APPROVE` / `APPROVE_WITH_COMMENTS` / `REQUEST_CHANGES`) as the final, user-facing
    output. There is nothing to route, escalate, or ask.
 
+7. **(Optional, doubly opt-in) Project the verdict into the knowledge graph.** Runs
+   strictly after Step 6 — the report and verdict are final and already printed; nothing
+   here can influence them. Read `~/.claude/spec-loop/knowledge-graph.json`; unless it is
+   `enabled` with a `vault_path` **and** `"review"` is in its `node_types`, do nothing,
+   silently (there is no decisions-log in this context — the bail path is a plain return).
+   Otherwise follow the `knowledge-graph` skill's peer-review caller playbook: one `batch`
+   call (payload `run_id` = the `<review-id>`) upserting a **single `review` node** —
+   `verdict` field, a one-line `summary`, an `observation` holding the severity counts and
+   at most 10 P0/P1 finding **titles** (≤120 chars each; never P2s, evidence excerpts,
+   requirement text, or diff hunks) — linked to `system/<repo-slug>` and to
+   **already-existing** `component` hubs only (one `query --type component` first; never
+   create components from a review), plus a touch-upsert of the `system` hub. No MOC, no
+   MCP enrichment. Fail open: on any helper error, print one line and finish — a vault
+   problem never fails the review.
+
 ## Notes
 
 - **Read-only / no write-back (explicit non-goals).** This command does **not**: edit,
   fix, commit, push, or merge anything; post a comment, approve, or merge on the provider;
   run an auto-fix loop, `receiving-code-review`, a `simplify` pass, or a quality-gate; or
   route / escalate / ask a question. Provider write-back (posting the report as PR
-  comments / a review) is a deliberate **future follow-on**, out of scope here.
+  comments / a review) is a deliberate **future follow-on**, out of scope here. The
+  optional Step 7 vault note is **not** a write-back: it goes to the user's own private
+  vault (outside the repo and the provider), only when the knowledge graph is enabled
+  **and** `review` is in its `node_types`, and carries only the verdict, severity counts,
+  and P0/P1 finding titles — never report bodies, evidence, or diff text. The published
+  report remains the entire human surface of the review.
 - **Security boundary.** `allowed-tools` excludes `Edit` and every mutation path; `Write`
   is scoped solely to the `docs/pr-review/<review-id>/` artifacts. The project CI gate
   (`scripts/validate_marketplace.py`) only checks that `description` is present, so this

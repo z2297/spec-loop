@@ -23,6 +23,26 @@ prior build. Pinned entries map to git tags `v<version>`.
 
 ## [Unreleased]
 ### Added
+- **Peer-review → knowledge graph (doubly opt-in `review` node type).** After
+  `/spec-loop:peer-review` publishes its report, it can project the verdict into the
+  Obsidian knowledge graph as ONE `Reviews/<review-id>.md` note — `verdict` frontmatter,
+  severity counts, and ≤10 P0/P1 finding titles (never P2s, report bodies, evidence, or
+  diff text) — linked to the repo `system` hub and already-existing `component` hubs only.
+  Requires the graph enabled AND `review` selected in `node_types` (a new, non-default
+  fifth option in `/spec-loop:knowledge-graph`), preserving every existing config as
+  non-publishing. Written strictly after the verdict prints (can influence nothing), no
+  MOC, no MCP enrichment, fail-open — mirroring the runbook's "one sanctioned write
+  outside the run directory" carve-out, now stated explicitly in the peer-review security
+  boundary. `runs` frontmatter records writer ids (run-ids and review-ids alike); review
+  ids are never remap-eligible and never in `known_ids`; `context` returns a repo-scoped
+  capped `reviews` list so accumulated review knowledge feeds Phase 0 intake.
+- **Knowledge-graph query mode ("ask the graph").** `/spec-loop:knowledge-graph
+  <free-text question>` answers from the accumulated graph: bounded retrieval (one ranked
+  `context` call + ≤2 `query` calls, keywords passed as separate argv tokens, never
+  shell-spliced) plus ≤3 note reads, synthesized with cited titles/paths and staleness —
+  and a plain "the graph has nothing on this" when it doesn't. Hard read-only; no args
+  still opens the config flow unchanged. `query` results now carry a `one_liner` snippet
+  so most questions need zero note reads.
 - **Knowledge-graph read-path intelligence.** The `context` subcommand gains request-aware
   relevance ranking (`--term`, repeatable, and `--request-file`: deterministic lexical
   overlap — title ×3, tags ×2, body ×1 — that **reorders but never filters**, so the

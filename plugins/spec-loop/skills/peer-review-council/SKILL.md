@@ -34,6 +34,12 @@ There is **no auto-fix loop, no `receiving-code-review`, no `code-simplifier` / 
 pass, no quality-gate, and no provider write-back** here. Those are all code-writing or
 decision-routing concerns and are explicitly out of scope (see *Read-only discipline*).
 
+(The peer-review *command* may, after this skill has finished and the report is
+published, run a doubly-opt-in knowledge-graph projection of the verdict into the user's
+own Obsidian vault — outside the repo and the provider. That is the controller's
+post-report step, not part of this council: this skill itself still writes nothing but
+the report.)
+
 ## Inputs
 
 The controller hands this procedure exactly two things.
