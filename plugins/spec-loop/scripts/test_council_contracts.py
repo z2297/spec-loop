@@ -330,6 +330,46 @@ class ValidateSliceStatusTests(unittest.TestCase):
         errors = cc.validate_slice_status(self._done(open_escalations=[{"t": 1}]))
         self.assertIn("open_escalations", " ".join(errors))
 
+    # --- optional run-metrics instrumentation fields (run_metrics.py) ------
+
+    def test_metrics_fields_absent_still_validates(self):
+        # Back-compat is permanent: a legacy sidecar with none of the
+        # started_at/finished_at/wave/counters fields is valid.
+        self.assertEqual(cc.validate_slice_status(self._done()), [])
+
+    def test_metrics_fields_valid_shapes_accepted(self):
+        obj = self._done(
+            started_at="2026-07-14T10:10:00Z",
+            finished_at="2026-07-14T11:10:00+00:00",
+            wave=0,
+            counters={"review_confirmed": 2, "fix_passes": 0,
+                      "fail_closed": 1},
+        )
+        self.assertEqual(cc.validate_slice_status(obj), [])
+
+    def test_metrics_timestamps_must_look_iso(self):
+        errors = cc.validate_slice_status(
+            self._done(started_at="yesterday", finished_at=12345))
+        joined = " ".join(errors)
+        self.assertIn("started_at", joined)
+        self.assertIn("finished_at", joined)
+
+    def test_wave_must_be_non_negative_int(self):
+        for bad in (-1, True, "1", 1.5):
+            errors = cc.validate_slice_status(self._done(wave=bad))
+            self.assertIn("wave", " ".join(errors), repr(bad))
+
+    def test_counters_values_must_be_non_negative_ints(self):
+        errors = cc.validate_slice_status(
+            self._done(counters={"fix_passes": -1, "fail_closed": "2"}))
+        joined = " ".join(errors)
+        self.assertIn("counters.fix_passes", joined)
+        self.assertIn("counters.fail_closed", joined)
+
+    def test_counters_must_be_an_object(self):
+        errors = cc.validate_slice_status(self._done(counters=[1, 2]))
+        self.assertIn("counters must be an object", " ".join(errors))
+
 
 class CliTests(unittest.TestCase):
     def test_validate_member_ok(self):

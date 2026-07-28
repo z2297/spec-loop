@@ -89,6 +89,7 @@ TARGET_FILES = (
     "scripts/pr_resolver.py",
     "scripts/quality_gate.py",
     "scripts/release.py",
+    "scripts/run_metrics.py",
     "scripts/spec_loop_guard.py",
     "scripts/validate_marketplace.py",
 )
@@ -124,6 +125,7 @@ PER_FILE_FLOORS = {
     "scripts/pr_resolver.py": 80,          # py3.12 preview 85.4% - 5 (not local 100%)
     "scripts/quality_gate.py": 87,         # local 92.6% (2026-07-07) - 5
     "scripts/release.py": 95,              # local 100% - 5
+    "scripts/run_metrics.py": 89,          # local 94.7% (2026-07-14) - 5
     "scripts/spec_loop_guard.py": 86,      # local 91.8% (2026-07-07) - 5
     "scripts/validate_marketplace.py": 94, # local 100% - ~6 (extra head-room)
 }

@@ -327,6 +327,42 @@ re-prompted — update it anytime with:
 /spec-loop:quality-gate
 ```
 
+## Run metrics
+
+Every run's autonomy behavior is measurable. The bundled `scripts/run_metrics.py`
+derives a versioned `metrics.json` from a run's durable artifacts:
+
+- **Safety/autonomy** — escalation rate and trigger distribution, auto-decided vs
+  surfaced ratio, council OBJECT rate and SAFETY objections, decision-reversibility
+  mix, precedent-reuse rate, fail-closed events.
+- **Quality** — quality-gate first-pass rate and refactor iterations, review
+  findings confirmed/refuted and auto-fix passes (from the slice status sidecars —
+  the precise channel), split rate/depth, integration-gate results, requirement
+  coverage from the runbook traceability table.
+- **Performance** — run wall clock, per-slice durations, achieved wave parallelism,
+  escalation answer latency (from ISO-8601 instrumentation the loop writes; legacy
+  runs degrade to git merge-commit dates under `--git`).
+- **Tokens (opt-in, best-effort)** — totals and per-agent-type/per-slice attribution
+  parsed from Claude Code session transcripts via `--transcripts <dir>`. The
+  transcript layout is an undocumented internal format, so this is strictly opt-in,
+  tolerant, and marked `best_effort`; `probe-transcripts` shows what the parser can
+  currently see. No pricing is bundled — pass `--usd-per-mtok-*` rates if you want
+  dollars.
+
+Metrics that cannot be derived are `null`, never a fabricated 0 — old runs without
+instrumentation still analyze retroactively. The controller writes `metrics.json` at
+each wave boundary and commits the final (git-enriched) snapshot with the runbook.
+The web dashboard shows each run's metrics (marked `committed` vs `live`), and:
+
+```
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/run_metrics.py" compute docs/spec-loop/<run-id> --git
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/run_metrics.py" trend . --md   # cross-run comparison table
+```
+
+The trend table is the feedback loop for developing the plugin itself: a change to
+the loop's prompts or gates should show up as a better (or at least not worse)
+escalation rate, first-pass rate, and wall clock in the next runs.
+
 ## Knowledge graph (optional)
 
 `/spec-loop` can accumulate what each run *learned* into a persistent **Obsidian knowledge

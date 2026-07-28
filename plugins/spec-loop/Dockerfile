@@ -38,6 +38,7 @@ WORKDIR /app
 # keeping the script and dashboard_assets/ co-located under /app/scripts/ works
 # unchanged.
 COPY scripts/dashboard_server.py scripts/dashboard_server.py
+COPY scripts/run_metrics.py scripts/run_metrics.py
 COPY scripts/dashboard_assets/ scripts/dashboard_assets/
 
 # Documentation only (does not publish the port; s3 does the -p mapping).

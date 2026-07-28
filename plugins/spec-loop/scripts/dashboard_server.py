@@ -41,6 +41,15 @@ from collections import namedtuple
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+# Sibling module (same scripts/ dir) providing the run-metrics pure core.
+# Tolerated as absent so an older deployment (e.g. a stale Docker image built
+# before run_metrics.py shipped) still serves runs — with metrics honestly
+# reported as null rather than crashing the whole dashboard.
+try:
+    import run_metrics
+except ImportError:  # pragma: no cover - packaging drift, not a logic path
+    run_metrics = None
+
 # A response value object: groups the four output fields so handler helpers
 # pass one argument instead of four (etag defaults to None).
 Response = namedtuple("Response", "status body content_type etag")
@@ -180,6 +189,7 @@ def _scan_one_run(run_dir):
     }
     enriched = [_label_slice(s, ctx, run_dir) for s in slices]
     runbook = _parse_runbook(run_dir)
+    metrics_doc, metrics_source = _run_metrics_doc(run_dir)
     return {
         "run_id": run_id,
         "base_ref": dag.get("base_ref"),
@@ -196,7 +206,46 @@ def _scan_one_run(run_dir):
         "artifacts": _list_artifacts(run_dir),
         "runbook": runbook,
         "has_runbook": runbook is not None,
+        "metrics": _metrics_summary(metrics_doc),
+        "metrics_source": metrics_source,
     }
+
+
+# --- run metrics (run_metrics.py pure core; read-only) -----------------------
+
+def _run_metrics_doc(run_dir):
+    """The run's metrics document: the committed ``metrics.json`` when it is
+    valid (``source: "file"``), else a live artifact-only recompute via the
+    run_metrics pure core (``source: "live"`` — reads files, never git or
+    transcripts, keeping this server's shells-out-to-nothing guarantee).
+    Returns ``(doc, source)`` or ``(None, None)`` when run_metrics is absent."""
+    if run_metrics is None:
+        return None, None
+    committed = _load_metrics_file(run_dir / "metrics.json")
+    if committed is not None:
+        return committed, "file"
+    artifacts = run_metrics.load_run_artifacts(run_dir)
+    return run_metrics.compute_metrics(artifacts), "live"
+
+
+def _load_metrics_file(path):
+    """Parse a committed metrics.json, or None when absent/malformed/wrong
+    schema (malformed falls back to a live recompute, never an error page)."""
+    try:
+        doc = json.loads(_read_text_capped(path) or "null")
+    except ValueError:
+        return None
+    if isinstance(doc, dict) and doc.get("schema_version") == run_metrics.SCHEMA_VERSION:
+        return doc
+    return None
+
+
+def _metrics_summary(doc):
+    """The fixed small summary dict carried on every run in the collection
+    payload (the full document is served only on the run-detail endpoint)."""
+    if doc is None:
+        return None
+    return run_metrics.summary_row(doc)
 
 
 def _dep_satisfied(dep_id, statuses):
@@ -503,7 +552,7 @@ def _list_artifacts(run_dir):
     run-state files plus any ``slice-*-report.md`` / ``slice-*-split.json``."""
     names = set()
     for name in ("dag.json", "request.md", "decisions-log.md",
-                 "escalations.md", "runbook.md"):
+                 "escalations.md", "runbook.md", "metrics.json"):
         if (run_dir / name).is_file():
             names.add(name)
     for pattern in ("slice-*-report.md", "slice-*-split.json"):
@@ -513,10 +562,12 @@ def _list_artifacts(run_dir):
 
 
 def _run_etag(run_dir):
-    """Per-run ETag from the mtimes of dag.json + sibling artifacts."""
+    """Per-run ETag from the mtimes of dag.json + sibling artifacts.
+    metrics.json is included so a mid-run ``run_metrics.py --write`` refresh
+    invalidates the client's 304 cache like any other artifact change."""
     parts = []
     for name in ("dag.json", "request.md", "escalations.md",
-                 "decisions-log.md", "runbook.md"):
+                 "decisions-log.md", "runbook.md", "metrics.json"):
         try:
             parts.append(f"{name}:{os.path.getmtime(run_dir / name):.6f}")
         except OSError:
@@ -602,6 +653,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if run_dir is None:
             return _text(404, b"not found")
         run = _namespace_run(_scan_one_run(Path(run_dir)), root_key)
+        doc, _source = _run_metrics_doc(Path(run_dir))
+        run = {**run, "metrics_full": doc}
         etag = _run_etag(Path(run_dir))
         return self._not_modified(etag) or _json_response(run, etag)
 

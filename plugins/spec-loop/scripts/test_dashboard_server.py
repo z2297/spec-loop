@@ -394,6 +394,86 @@ class ScanRunsTests(unittest.TestCase):
             self.assertEqual(labels["s2"], "runnable-pending")
 
 
+class MetricsIntegrationTests(unittest.TestCase):
+    """The run-metrics wiring: committed metrics.json preferred, live
+    artifact-only recompute otherwise, malformed/wrong-schema files fall back
+    to live, and metrics.json participates in artifacts + the run ETag."""
+
+    def setUp(self):
+        import tempfile
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self.tmpdir.name)
+        self.docs = build_fixture(self.tmp)
+        self.run_dir = self.docs / "run-normal"
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def scan_run(self):
+        return next(r for r in ds.scan_runs(self.docs)
+                    if r["run_id"] == "run-normal")
+
+    def write_committed(self, mutate=None):
+        import run_metrics as rm
+        doc = rm.compute_metrics(rm.load_run_artifacts(self.run_dir))
+        if mutate:
+            mutate(doc)
+        (self.run_dir / "metrics.json").write_text(json.dumps(doc))
+        return doc
+
+    def test_live_summary_when_no_committed_file(self):
+        run = self.scan_run()
+        self.assertEqual(run["metrics_source"], "live")
+        self.assertIn("escalations", run["metrics"])
+        self.assertIn("autonomy_ratio", run["metrics"])
+        # The summary is the fixed small dict, not the full document.
+        self.assertNotIn("safety", run["metrics"])
+
+    def test_committed_file_preferred_over_live(self):
+        def mark(doc):
+            doc["safety"]["decisions_total"] = 424242
+            doc["safety"]["autonomy_ratio"] = 0.4242
+        self.write_committed(mark)
+        run = self.scan_run()
+        self.assertEqual(run["metrics_source"], "file")
+        self.assertEqual(run["metrics"]["autonomy_ratio"], 0.4242)
+
+    def test_malformed_committed_file_falls_back_to_live(self):
+        (self.run_dir / "metrics.json").write_text("{{{ not json")
+        run = self.scan_run()
+        self.assertEqual(run["metrics_source"], "live")
+        self.assertIsNotNone(run["metrics"])
+
+    def test_wrong_schema_version_falls_back_to_live(self):
+        (self.run_dir / "metrics.json").write_text(
+            json.dumps({"schema_version": 999}))
+        self.assertEqual(self.scan_run()["metrics_source"], "live")
+
+    def test_metrics_json_listed_in_artifacts(self):
+        self.assertNotIn("metrics.json", self.scan_run()["artifacts"])
+        self.write_committed()
+        self.assertIn("metrics.json", self.scan_run()["artifacts"])
+
+    def test_run_etag_invalidated_by_metrics_write(self):
+        before = ds._run_etag(self.run_dir)
+        self.write_committed()
+        self.assertNotEqual(before, ds._run_etag(self.run_dir))
+
+    def test_unreadable_run_carries_no_metrics(self):
+        run = next(r for r in ds.scan_runs(self.docs)
+                   if r["run_id"] == "run-corrupt")
+        self.assertEqual(run["status"], "unreadable")
+        self.assertNotIn("metrics", run)
+
+    def test_metrics_unavailable_when_module_absent(self):
+        # A stale deployment without run_metrics.py degrades to null metrics,
+        # never a crash (the tolerant-import contract).
+        with mock.patch.object(ds, "run_metrics", None):
+            run = self.scan_run()
+        self.assertIsNone(run["metrics"])
+        self.assertIsNone(run["metrics_source"])
+
+
 class EscalationHelperUnitTests(unittest.TestCase):
     """Direct unit tests of the pure escalation-parser helpers (their fallthrough
     return branches), asserting the returned value contract."""
@@ -545,6 +625,18 @@ class HttpServerTests(unittest.TestCase):
     def test_foreign_host_rejected(self):
         status, _, _ = self.request("GET", "/api/runs", host="evil.com")
         self.assertEqual(status, 421)
+
+    def test_detail_carries_full_metrics_collection_only_summary(self):
+        status, body, _ = self.request("GET", "/api/runs/run-normal")
+        self.assertEqual(status, 200)
+        run = json.loads(body)
+        self.assertIn("metrics_full", run)
+        self.assertIn("safety", run["metrics_full"])
+        self.assertEqual(run["metrics_source"], "live")
+        status, body, _ = self.request("GET", "/api/runs")
+        runs = {r["run_id"]: r for r in json.loads(body)["runs"]}
+        self.assertNotIn("metrics_full", runs["run-normal"])
+        self.assertIn("autonomy_ratio", runs["run-normal"]["metrics"])
 
     def test_substring_host_attack_rejected(self):
         status, _, _ = self.request(

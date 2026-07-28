@@ -39,6 +39,7 @@ const EXPORTS = [
   "labelClass", "verdictClass", "sha7", "truncate", "groupRunsByRoot", "parseHashFrom",
   "el", "overviewCard", "rootGroupSection", "sliceRow", "__setDocument",
   "stageStrip", "councilSection", "executionSection", "finalReviewSection", "escalationsSection",
+  "metricsSection", "overviewMetricPills", "fmtMetric", "fmtDuration",
 ];
 
 // Extract the inline <script> body and rewrite it into an importable ES module:
@@ -390,6 +391,78 @@ test("escalationsSection lists all with status, falls back to open-only, and han
   assert.match(fb.textContent, /OPEN/);
   // truly empty
   assert.match(mod.escalationsSection({ escalations: [] }).textContent, /none/);
+});
+
+// ---- 7. run-metrics panel (run_metrics.py summary; nulls render as "—") ----
+test("fmtMetric renders nulls as em dash, ratios to 2dp, durations humanized", () => {
+  assert.equal(mod.fmtMetric("autonomy_ratio", null), "—");
+  assert.equal(mod.fmtMetric("autonomy_ratio", undefined), "—");
+  assert.equal(mod.fmtMetric("autonomy_ratio", 0.6667), "0.67");
+  assert.equal(mod.fmtMetric("escalations", 0), "0");         // 0 is real, not "—"
+  assert.equal(mod.fmtMetric("integration_gate", "PASS"), "PASS");
+  assert.equal(mod.fmtMetric("wall_clock_s", 5400), "1h30m");
+});
+
+test("fmtDuration covers seconds, minutes, and hours", () => {
+  assert.equal(mod.fmtDuration(42), "42s");
+  assert.equal(mod.fmtDuration(150), "2m30s");
+  assert.equal(mod.fmtDuration(16425), "4h33m");
+  assert.equal(mod.fmtDuration(-5), "0s");                    // clamped, never negative
+});
+
+test("metricsSection renders one pill per allowlisted field with a provenance chip", () => {
+  const sec = mod.metricsSection({
+    metrics: {
+      escalations: 2, autonomy_ratio: 0.6, council_object_rate: 0.0909,
+      quality_gate_first_pass_rate: 0.75, split_rate: 0, integration_gate: "PASS",
+      wall_clock_s: 16425, tokens_total: null,
+    },
+    metrics_source: "file",
+  });
+  const text = sec.textContent;
+  assert.match(text, /run metrics/);
+  assert.match(text, /committed/);            // metrics_source: "file" chip
+  assert.match(text, /autonomy: 0\.60/);
+  assert.match(text, /gate: PASS/);
+  assert.match(text, /wall clock: 4h33m/);
+  assert.match(text, /tokens: —/);            // null renders as em dash
+  assert.doesNotMatch(text, /NaN|undefined|null/);
+  const row = sec.children.find((n) => /pill-row/.test(n.className));
+  assert.equal(row.children.length, 8);       // exactly the fixed field allowlist
+});
+
+test("metricsSection tolerates absent metrics and hostile payload keys never render", () => {
+  const none = mod.metricsSection({});
+  assert.match(none.textContent, /no metrics available/);
+  // Extra/hostile keys in the payload are ignored — only the fixed allowlist
+  // renders (payload keys are never iterated), and values are textContent-only.
+  const hostile = mod.metricsSection({
+    metrics: { "<img src=x>": "x", __proto__: { evil: 1 }, escalations: 1 },
+    metrics_source: "live",
+  });
+  assert.doesNotMatch(hostile.textContent, /img src/);
+  assert.match(hostile.textContent, /live/);
+  const row = hostile.children.find((n) => /pill-row/.test(n.className));
+  assert.equal(row.children.length, 8);
+  for (const pillNode of row.children) assert.equal(pillNode.children.length, 0);
+});
+
+test("overviewMetricPills yields 3 headline pills, or none when metrics absent", () => {
+  assert.deepEqual(mod.overviewMetricPills({}), []);
+  const pills = mod.overviewMetricPills({
+    metrics: { escalations: 1, autonomy_ratio: 0.5, wall_clock_s: 60 },
+  });
+  assert.equal(pills.length, 3);
+  assert.match(pills.map((p) => p.textContent).join("|"), /esc: 1\|autonomy: 0\.50\|wall: 1m00s/);
+});
+
+test("overviewCard carries the headline metric pills when metrics are present", () => {
+  const card = mod.overviewCard({
+    run_id: "r1", base_ref: "alpha", base_sha: "abc", counts: {},
+    metrics: { escalations: 2, autonomy_ratio: 0.6, wall_clock_s: null },
+  });
+  assert.match(card.textContent, /esc: 2/);
+  assert.match(card.textContent, /wall: —/);
 });
 
 test("executionSection composes waves, slice table, rollup, and decisions into one view", () => {

@@ -292,7 +292,41 @@ def validate_slice_status(obj):
     ):
         errors.append("open_escalations must be an array of strings")
 
+    _validate_metrics_fields(obj, errors)
+
     return errors
+
+
+# Optional run-metrics instrumentation fields (consumed by run_metrics.py).
+# All of them are OPTIONAL forever: a legacy sidecar without any of them must
+# still validate — they are only shape-checked when present.
+ISO_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
+
+
+def _is_count(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _validate_metrics_fields(obj, errors):
+    """Shape-check the optional started_at/finished_at/wave/counters fields."""
+    for field in ("started_at", "finished_at"):
+        value = obj.get(field)
+        if value is not None and not (
+            isinstance(value, str) and ISO_TIMESTAMP.match(value)
+        ):
+            errors.append("%s must be an ISO-8601 timestamp string" % field)
+    wave = obj.get("wave")
+    if wave is not None and not _is_count(wave):
+        errors.append("wave must be a non-negative integer")
+    counters = obj.get("counters")
+    if counters is None:
+        return
+    if not isinstance(counters, dict):
+        errors.append("counters must be an object of non-negative integers")
+        return
+    for key, value in counters.items():
+        if not _is_count(value):
+            errors.append("counters.%s must be a non-negative integer" % key)
 
 
 def cmd_validate_slice_status(text):

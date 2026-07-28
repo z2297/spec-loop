@@ -65,6 +65,10 @@
     .lbl-blocked-pending    { color: var(--muted);   border-color: var(--border); }
     .lbl-unknown            { color: var(--neutral); border-color: var(--neutral); }
 
+    /* run-metrics pills + provenance chip (run_metrics.py summary) */
+    .m-pill          { color: var(--accent); border-color: var(--border); }
+    .metrics-source  { margin-left: 0.5rem; text-transform: none; letter-spacing: 0; }
+
     .section { margin: 1.25rem 0; }
     .section h3 {
       font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em;
@@ -375,6 +379,7 @@
       const excerpt = el("div", { cls: "excerpt", text: run.request_excerpt || "" });
       const counts = el("div", { cls: "counts" });
       countPills(run.counts).forEach((p) => counts.appendChild(p));
+      overviewMetricPills(run).forEach((p) => counts.appendChild(p));
       card.append(h2, meta, excerpt, counts);
       card.addEventListener("click", () => navigate({ kind: "detail", runId: run.run_id }));
       return card;
@@ -406,6 +411,7 @@
       $view.appendChild(detailHeader(run));
       $view.appendChild(stageStrip(run, activeStage));
       $view.appendChild(stageView(run, activeStage));
+      $view.appendChild(metricsSection(run));
       $view.appendChild(escalationsSection(run));
     }
     // Dispatch the active stage to its section builder (browser-only orchestrator;
@@ -582,6 +588,61 @@
       });
       return sec;
     }
+    // ---- run metrics panel (run_metrics.py summary) ------------------------
+    // Fixed field allowlist (same philosophy as labelClass): only these keys
+    // of run.metrics are ever rendered, in this order — payload keys are never
+    // iterated. Null/absent values render as "—", never NaN/undefined.
+    const METRIC_FIELDS = [
+      ["escalations", "escalations"],
+      ["autonomy_ratio", "autonomy"],
+      ["council_object_rate", "council OBJ"],
+      ["quality_gate_first_pass_rate", "QG 1st-pass"],
+      ["split_rate", "splits"],
+      ["integration_gate", "gate"],
+      ["wall_clock_s", "wall clock"],
+      ["tokens_total", "tokens"],
+    ];
+    function fmtDuration(secs) {
+      const s = Math.max(0, Math.round(secs));
+      const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+      if (h) return h + "h" + String(m).padStart(2, "0") + "m";
+      if (m) return m + "m" + String(s % 60).padStart(2, "0") + "s";
+      return s + "s";
+    }
+    function fmtMetric(key, value) {
+      if (value == null) return "—";
+      if (key === "wall_clock_s") return fmtDuration(value);
+      if (typeof value === "number" && !Number.isInteger(value)) return value.toFixed(2);
+      return String(value);
+    }
+    function metricsSection(run) {
+      const sec = el("div", { cls: "section" });
+      sec.appendChild(el("h3", { text: "run metrics" }));
+      const m = run.metrics;
+      if (!m) {
+        sec.appendChild(el("div", { cls: "empty", text: "no metrics available" }));
+        return sec;
+      }
+      if (run.metrics_source) {
+        sec.appendChild(el("span", {
+          cls: "chip metrics-source",
+          text: run.metrics_source === "file" ? "committed" : "live",
+        }));
+      }
+      const row = el("div", { cls: "pill-row" });
+      METRIC_FIELDS.forEach(([key, label]) =>
+        row.appendChild(pill(label, fmtMetric(key, m[key]), "m-pill")));
+      sec.appendChild(row);
+      return sec;
+    }
+    // The 3 headline metrics shown on each overview card (empty when absent).
+    function overviewMetricPills(run) {
+      if (!run.metrics) return [];
+      return [["escalations", "esc"], ["autonomy_ratio", "autonomy"],
+              ["wall_clock_s", "wall"]].map(([key, label]) =>
+        pill(label, fmtMetric(key, run.metrics[key]), "m-pill"));
+    }
+
     function decisionsSection(run) {
       const sec = el("div", { cls: "section" });
       sec.appendChild(el("h3", { text: "recent decisions" }));
@@ -722,6 +783,7 @@
         labelClass, verdictClass, sha7, truncate, groupRunsByRoot, parseHashFrom,
         el, overviewCard, rootGroupSection, sliceRow, __setDocument,
         stageStrip, councilSection, executionSection, finalReviewSection, escalationsSection,
+        metricsSection, overviewMetricPills, fmtMetric, fmtDuration,
       };
     }
   </script>
