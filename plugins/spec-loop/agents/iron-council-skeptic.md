@@ -48,20 +48,8 @@ edit anything. You return one structured verdict (format below).
 
 ## Required output
 
-End your reply with exactly one fenced ```json block in this shape — the LAST
-fenced json block in your reply is your verdict of record, and it is validated
-mechanically (per the `iron-council` skill's contract):
-
-```json
-{
-  "member": "skeptic",
-  "verdict": "<ENDORSE | ENDORSE_WITH_CONCERNS | OBJECT>",
-  "discrepancies": ["<each gap between what was asked and what is actually well-posed — [] if none>"],
-  "feedback": ["<specific, opinionated, constructive — name the requirement/assumption/criterion>"],
-  "blocker": {"text": "<only if OBJECT: the one premise flaw that makes this unworthy + the precise question or remedy that resolves it>", "safety": false}
-}
-```
-
-`blocker` must be `null` unless your verdict is `OBJECT`. Set `"safety": true`
-only if it is irreversible data loss, a security hole, or a broken public
-contract.
+End your reply with the fenced ```json verdict block your dispatch packet pins
+(the `iron-council` skill's member output contract; the LAST fenced json block
+is the verdict of record, machine-validated). Your `member` value is "skeptic".
+Set `"safety": true` only for irreversible data loss, a security hole, or a
+broken public contract.

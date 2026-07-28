@@ -7,32 +7,36 @@ description: Use when running the spec-loop autonomously and about to stop, ask 
 
 ## Overview
 
-This is the single decision procedure every spec-loop layer (controller, slice worker, and any skill they invoke) MUST run **before stopping or asking the human anything**. Its job is to keep the loop autonomous by default and interrupt the human **only** when a decision genuinely cannot be made.
+This is the single decision procedure every spec-loop layer (controller, slice worker, and any skill they invoke) runs **before stopping or asking the human anything**. Its job is to keep the loop autonomous by default and interrupt the human **only** when a decision genuinely cannot be made.
 
 This contract **intentionally overrides** the built-in human checkpoints of the chained skills:
 - `spec-loop:brainstorming`'s "ask one question at a time + require design approval" → replaced by this gate.
 - `spec-loop:subagent-driven-development`'s consent-before-`main` and BLOCKED→human escalation → satisfied by always working in a worktree and routing through this gate.
 - A `spec-loop:review-pr` finding at/above the slice's blocking bar (per `spec-loop:review-depth-map`) → routed through this gate after the auto-fix loop.
 
-`spec-loop:verification-before-completion` is **NOT** overridden — it remains a hard, no-human gate (evidence before any completion claim).
+`spec-loop:verification-before-completion` is **not** overridden — it remains a hard, no-human gate (evidence before any completion claim).
 
 ## The decision procedure
 
 For any point where you would otherwise stop or ask, classify it:
 
 ### PROCEED + log (the default)
-Take the action yourself and append a one-line entry to `decisions-log.md` when ALL of these hold:
+Take the action yourself and append a one-line entry to `decisions-log.md` when all of these hold:
 - The choice is determinable from the spec, the codebase, existing conventions, or an unambiguous best practice, **OR**
 - The assumption is trivial, cosmetic, and cheaply reversible (naming, formatting, internal helper placement, test fixture details), **AND**
 - Getting it wrong does not silently change observable behavior, public contracts, persisted data, or security posture.
 
 Log format (one line each, append-only):
 ```
-[<slice-id>] DECISION: <what was decided> — RATIONALE: <evidence/convention> — REVERSIBILITY: <trivial|moderate>
+[<slice-id>] DECISION: <what was decided> — RATIONALE: <evidence/convention> — REVERSIBILITY: <trivial|moderate|high|n/a> — AT: <ISO-8601 UTC, e.g. 2026-07-14T10:30:00Z>
 ```
+The trailing ` — AT: <timestamp>` token feeds `run_metrics.py`; keep it last on the line
+and never move the leading `[<slice-id>]` bracket, which the dashboard and metrics
+parsers key on. Get the timestamp from `date -u +%Y-%m-%dT%H:%M:%SZ`; if unavailable,
+omit the token rather than inventing one.
 
 ### SURFACE to human (only these five triggers)
-Do NOT act. Write an escalation entry (format below) and return control:
+Do not act. Write an escalation entry (format below) and return control:
 
 1. **Genuine ambiguity** — there are ≥2 valid interpretations that materially change scope or behavior, and the codebase/spec cannot resolve which is intended.
 2. **Material assumption** — you would be assuming something non-trivial that affects behavior, scope, public contracts, persisted data, security, or external integrations. (Per the user's global CLAUDE.md, material assumptions must be stated and confirmed — not silently made.)
@@ -44,31 +48,29 @@ When uncertain whether something is "material": if a reasonable reviewer could r
 
 ### Precedent check (before writing any SURFACE escalation)
 
-Prior runs' human answers are settled decisions — check them before interrupting
-the human with a question they may have already answered. Search prior runs
-(excluding the current run's directory), e.g.
-`grep -l "status: ANSWERED" docs/spec-loop/*/escalations.md` plus the Decisions
-Summary of any `docs/spec-loop/*/runbook.md`:
+Prior runs' human answers are settled decisions — check them before asking a question
+the human may have already answered. Search prior runs (excluding this one), e.g.
+`grep -l "status: ANSWERED" docs/spec-loop/*/escalations.md` plus the Decisions Summary
+of any `docs/spec-loop/*/runbook.md`:
 
 - **A prior human answer squarely resolves this decision** (same question in
-  substance, answer still applicable to this codebase state) → do NOT surface.
+  substance, answer still applicable to this codebase state) → do not surface.
   PROCEED + log, citing the precedent:
   ```
-  [<slice-id>] DECISION: <what was decided> — RATIONALE: precedent — run <run-id> escalation "<title>" answered: <one-line summary of the human's answer> — REVERSIBILITY: <trivial|moderate>
+  [<slice-id>] DECISION: <what was decided> — RATIONALE: precedent — run <run-id> escalation "<title>" answered: <one-line summary of the human's answer> — REVERSIBILITY: <trivial|moderate|high|n/a> — AT: <ISO-8601 UTC>
   ```
   This is what keeps run N's adjudication from becoming run N+1's escalation.
 - **A prior answer is related but not squarely on point** → still surface, but
   quote the prior answer in the escalation's RECOMMENDED DEFAULT option so the
   human confirms rather than re-derives.
-- **Guard:** precedent only resolves what a human has *already* adjudicated — it
-  never downgrades a genuinely new material assumption, a SAFETY objection, or a
-  decision whose context has materially changed since the prior run. When in
-  doubt whether the precedent squarely applies, surface with it as the default.
+- **Guard:** precedent only resolves what a human has *already* adjudicated. It never
+  downgrades a new material assumption, a SAFETY objection, or a decision whose context
+  has materially changed. When in doubt, surface with the precedent as the default.
 
 ### Not triggers (autonomous by design)
-These look like stopping points but are **not** surfaced — they are handled by the loop itself, keeping the bar at exactly the five triggers above:
-- **Slice split (dynamic decomposition).** A slice that turns out to be two-or-more independently shippable changes returns `SPLIT` with a sub-decomposition the controller grafts into the DAG (slice Step 1.6). Autonomous, logged to `decisions-log.md`, no human contact. Only an oversized slice already at the split-depth cap falls back to a trigger above (material assumption / council objection).
-- **Integration remediation.** When the per-wave check or the Phase 5 integration gate finds a cross-slice failure, the controller opens a remediation slice and fixes it through the normal slice loop. The human is reached only if that remediation slice itself exhausts its bounded auto-fix loop — i.e. via trigger 3 (unfixable review BLOCK), unchanged.
+Two things that look like stopping points but are handled by the loop itself, keeping the bar at exactly the five triggers above:
+- **Slice split.** A slice that turns out to be two-or-more independently shippable changes returns `SPLIT` for the controller to graft into the DAG — logged, no human contact. Only an oversized slice already at the split-depth cap falls back to a trigger above.
+- **Integration remediation.** A cross-slice failure opens a remediation slice that runs the normal slice loop; the human is reached only if that slice exhausts its own auto-fix budget (trigger 3).
 
 ## Batching rule (critical for non-blocking operation)
 
@@ -76,7 +78,7 @@ These look like stopping points but are **not** surfaced — they are handled by
 
 1. Append each escalation to `docs/spec-loop/<run-id>/escalations.md`.
 2. The slice worker returns status `NEEDS_DECISION` (pausing only that slice) and keeps independent slices running.
-3. The **controller** (running in the main session) collects all open escalations at the **wave boundary** and surfaces them as ONE batched `AskUserQuestion` round, then injects answers and re-dispatches the paused slices.
+3. The **controller** (running in the main session) collects all open escalations at the **wave boundary** and surfaces them as one batched `AskUserQuestion` round, then injects answers and re-dispatches the paused slices.
 
 ## Escalation entry format
 
@@ -84,6 +86,7 @@ Append to `escalations.md`:
 ```
 ## [<slice-id>] <short title>   (status: OPEN)
 - Trigger: <ambiguity | material-assumption | review-block | council-objection | quality-gate-block>
+- Opened: <ISO-8601 UTC, from date -u +%Y-%m-%dT%H:%M:%SZ>
 - Context: <what the loop was doing and why it cannot decide>
 - The decision: <the precise question>
 - Options:
@@ -92,14 +95,18 @@ Append to `escalations.md`:
   3. <option C> — <tradeoff>
 - If unanswered: pause this slice; continue all independent slices.
 - Answer: <filled in by controller after human responds>
+- Answered-at: <ISO-8601 UTC, written by the controller with the answer>
 ```
 
-Always include a **recommended default** — the loop should make the human's decision as cheap as possible (confirm vs. redirect), consistent with the user's preference for conservative/balanced/innovative options where relevant.
+`Opened:`/`Answered-at:` feed `run_metrics.py`'s answer-latency metric. Both are optional
+to the parsers, but new escalations should always carry `Opened:`.
 
-## Red flags (you are violating the contract)
-- Asking the human something resolvable from the codebase, a clear convention, or
-  a prior run's answered escalation (run the precedent check first).
-- Surfacing escalations one at a time instead of batching at the wave boundary.
-- Proceeding silently on a material assumption (must log AND surface).
-- Looping the auto-fix step forever instead of surfacing after the attempt budget.
-- Skipping `verification-before-completion` because "the gate said proceed" — that gate is separate and never skipped.
+Always include a **recommended default** — make the human's decision as cheap as possible
+(confirm vs. redirect).
+
+## Violations of the contract
+- Asking the human something resolvable from the codebase, a convention, or a prior
+  run's answered escalation (run the precedent check first).
+- Proceeding silently on a material assumption — it must be logged *and* surfaced.
+- Skipping `verification-before-completion` because this gate said proceed; that gate
+  is separate and never skipped.

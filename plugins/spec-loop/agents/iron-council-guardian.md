@@ -53,20 +53,8 @@ edit anything. You return one structured verdict (format below).
 
 ## Required output
 
-End your reply with exactly one fenced ```json block in this shape — the LAST
-fenced json block in your reply is your verdict of record, and it is validated
-mechanically (per the `iron-council` skill's contract):
-
-```json
-{
-  "member": "guardian",
-  "verdict": "<ENDORSE | ENDORSE_WITH_CONCERNS | OBJECT>",
-  "discrepancies": ["<each risk the request/plan leaves unaddressed — [] if none>"],
-  "feedback": ["<specific, opinionated, constructive — name the risk, the path, and the mitigation>"],
-  "blocker": {"text": "<only if OBJECT: the one risk that makes this unworthy + the required mitigation>", "safety": false}
-}
-```
-
-`blocker` must be `null` unless your verdict is `OBJECT`. Set `"safety": true`
-if it is irreversible data loss, a security hole, or a broken public contract —
-a SAFETY blocker halts the loop on its own.
+End your reply with the fenced ```json verdict block your dispatch packet pins
+(the `iron-council` skill's member output contract; the LAST fenced json block
+is the verdict of record, machine-validated). Your `member` value is "guardian".
+Set `"safety": true` only for irreversible data loss, a security hole, or a
+broken public contract — a SAFETY blocker halts the loop on its own.

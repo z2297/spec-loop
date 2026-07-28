@@ -29,7 +29,7 @@ Each aspect maps to exactly one agent. Names are fixed — dispatch by these exa
 | `comments` | `spec-loop:comment-analyzer` | comments/docs added or modified | comment accuracy, rot, doc completeness |
 | `errors` | `spec-loop:silent-failure-hunter` | error handling / catch / fallback / retry changed | silent failures, swallowed errors |
 | `types` | `spec-loop:type-design-analyzer` | types / interfaces / schemas added or modified | encapsulation, invariants |
-| `simplify` | `spec-loop:code-simplifier` | **explicit request only** — never part of default or `all` | runs LAST after review converges; the ONLY agent that edits code; non-blocking (per `spec-loop:review-depth-map`) |
+| `simplify` | `spec-loop:code-simplifier` | **explicit request only** — never part of default or `all` | runs last, after review converges; the only agent that edits code; non-blocking (per `spec-loop:review-depth-map`) |
 
 `all` = the five **review** aspects forced (`code`, `tests`, `comments`, `errors`, `types`) regardless of file types. `all` never includes `simplify`.
 
@@ -50,13 +50,11 @@ Append a mode keyword after the aspects (e.g. `spec-loop:review-pr all parallel`
 |------|-----------|-------|
 | `sequential` (default) | selected aspects | one agent at a time; each report complete before the next — easier to read and act on |
 | `parallel` | selected aspects | all review agents dispatched together, results return together — faster for a large diff |
-| `exhaustive` **(NEW, spec-loop 2026-07-13)** | ALL FIVE review agents forced regardless of file types, no auto-selection | parallel; findings reported on **P0–P3** (adds the P3 nitpick band) |
+| `exhaustive` | all five review agents forced regardless of file types, no auto-selection | parallel; findings reported on **P0–P3** (adds the P3 nitpick band) |
 
-`exhaustive` is the Tier-3 depth option that `spec-loop:review-depth-map` maps to. It forces the five review agents only — `simplify` is still not included and runs only when separately requested. The P3 band is reported but never blocking. This natively replaces the formerly-optional external `/exhaustive-pr-review:exhaustive-pr all parallel`.
+`exhaustive` is the Tier-3 depth option that `spec-loop:review-depth-map` maps to. It forces the five review agents only — `simplify` is still not included and runs only when separately requested. The P3 band is reported but never blocking.
 
-### Subagent-nesting rule (mandatory when the caller is a subagent)
-
-When the caller is itself a subagent — the `spec-loop:spec-loop-slice` worker at its Step 3, or a subagent `peer-review-council` controller — the platform forbids it from backgrounding agents. So it MUST dispatch **all review agents via Task in a single message, each with `run_in_background: false`**. This mirrors `spec-loop-slice.md` Step 1.5: "dispatch every member with `run_in_background: false` (one message of synchronous Task calls still runs them concurrently)." A top-level (non-subagent) caller may dispatch however it likes.
+Subagent callers dispatch synchronously in one message — see `spec-loop:dispatching-parallel-agents` §Subagent nesting.
 
 `simplify` is the exception to any parallel dispatch: it runs **last, alone, after the main review has converged** (findings below the caller's blocking bar, no open escalation), because it edits code and must not race the reviewers.
 
@@ -125,63 +123,9 @@ Report-only mode is compatible with any review mode (`sequential` / `parallel` /
 - **`spec-loop:spec-loop-slice`** runs the exact command from its plan header at Step 3, verifies blocking findings adversarially (Step 3b), auto-fixes (Step 4), then runs the `simplify` polish pass (Step 4b) once the review converges. If a plan header written before this skill existed still names `pr-review-toolkit:review-pr <args>`, the worker executes it as the equivalent `spec-loop:review-pr <args>`.
 - **`spec-loop:peer-review-council`** runs a **report-only** pass, picking depth via `review-depth-map`, and normalizes the findings onto its P0/P1/P2 scale using the canonical mapping above.
 
-## Worked example
-
-A slice worker's plan header set `review="spec-loop:review-pr exhaustive"` for a Tier-3 change touching `src/export.py`. At Step 3 the worker dispatches — in one message, each `run_in_background: false` — the five review agents against the slice diff:
-
-```
-spec-loop:review-pr exhaustive
-# scope: slice diff  a7981ec..3df7661  (src/export.py, tests/test_export.py)
-# forced: guideline-reviewer, pr-test-analyzer, comment-analyzer,
-#         silent-failure-hunter, type-design-analyzer  (parallel, P0–P3)
-```
-
-Expected aggregated output:
-
-```markdown
-# PR Review Summary
-
-## Critical Issues (1 found)
-- [silent-failure-hunter] Auth check skipped on the streaming path — unauthenticated export possible [src/export.py:41]
-
-## Important Issues (1 found)
-- [pr-test-analyzer] No test asserts delimiter escaping round-trips [tests/test_export.py]
-
-## Suggestions (1 found)
-- [guideline-reviewer] Duplicated header-formatting block; extract a helper [src/export.py:88]
-
-## Nitpicks (P3, non-blocking)
-- [comment-analyzer] Docstring says "returns list" but function yields [src/export.py:50]
-
-## Strengths
-- Streaming implementation avoids buffering the full result set
-
-## Recommended Action
-1. Fix critical issues first
-2. Address important issues
-3. Consider suggestions
-4. Re-run review after fixes
-```
-
-The Critical → P0 / Important → P1 / Suggestion → P2 / Nitpick → P3 mapping lets the slice worker compare these findings against its plan header's blocking bar without re-reading the agents.
-
 ## When NOT to use this
 
 - **Read-only review of a merged or open PR against business requirements** → `spec-loop:peer-review-council`. That skill *calls* this one in report-only mode for corroboration, but it owns the requirement-traceability matrix and the published report.
 - **Deciding how deep the review goes** (which aspects, which mode, what blocks) → `spec-loop:review-depth-map`.
 - **Acting on review feedback** (verifying a finding, pushing back, applying a fix) → `spec-loop:code-review-discipline` (Part 2). This skill produces findings; that skill governs how you respond to them.
 - **Choosing whether to interrupt the human** on an unfixable block → `spec-loop:escalation-gate`.
-
-## Provenance and maintenance
-
-Ported from `pr-review-toolkit` (Anthropic, claude-plugins-official marketplace) `commands/review-pr.md` on 2026-07-13; adapted for spec-loop:
-- **Command → skill reframing.** Reframed as a subagent-loadable contract (this file) with a thin same-name command wrapper, following the precedent of `spec-loop:quality-gate` and `spec-loop:knowledge-graph`. `pr-review-toolkit` is not a live dependency.
-- **Agent renames.** `code-reviewer` → `spec-loop:guideline-reviewer` (disambiguated from other reviewers and named for what it does — checks project guidelines). The other four review agents and `code-simplifier` keep their names under the `spec-loop:` namespace.
-- **Native `exhaustive` mode + P3 band (NEW, unproven).** Forces all five review agents in parallel with a P3 nitpick band; replaces the formerly-optional external `/exhaustive-pr-review:exhaustive-pr all parallel` for Tier 3. New in spec-loop 2026-07-13 — treat as unproven until it has runtime mileage.
-- **Canonical severity mapping moved here.** The Critical/Important/Suggestion → P0/P1/P2 (+P3) table now lives in this skill's Aggregation section; `spec-loop:peer-review-council` cross-references it instead of pinning its own copy.
-- **Report-only mode formalized.** The flag `peer-review-council` needs (no simplify, no fixes, findings-only) is now a first-class part of the contract.
-
-Re-verify if things drift:
-- `ls plugins/spec-loop/agents/guideline-reviewer.md plugins/spec-loop/agents/code-simplifier.md plugins/spec-loop/agents/comment-analyzer.md plugins/spec-loop/agents/pr-test-analyzer.md plugins/spec-loop/agents/silent-failure-hunter.md plugins/spec-loop/agents/type-design-analyzer.md`
-- `grep -n "spec-loop:review-pr" plugins/spec-loop/skills/review-depth-map/SKILL.md plugins/spec-loop/agents/spec-loop-slice.md`
-- `python3 scripts/validate_marketplace.py .`

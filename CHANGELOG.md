@@ -23,6 +23,31 @@ prior build. Pinned entries map to git tags `v<version>`.
 
 ## [Unreleased]
 ### Added
+- **Run-metrics harness (`scripts/run_metrics.py`).** Derives a versioned
+  `metrics.json` per run from the durable artifacts — safety/autonomy (escalation
+  rate + triggers, autonomy ratio, council OBJECT/SAFETY rates, reversibility mix,
+  precedent reuse, fail-closed events), quality (quality-gate first-pass rate and
+  refactor iterations, sidecar review counters, split rate, integration-gate
+  results, runbook requirement coverage), performance (run wall clock, per-slice
+  durations, wave parallelism, escalation answer latency), and opt-in best-effort
+  token accounting from Claude Code transcripts (`--transcripts`, with
+  `probe-transcripts` for schema-drift visibility). `trend --md` prints a cross-run
+  comparison table. Null-honest: underivable metrics are `null`, and legacy runs
+  analyze retroactively (timing via `--git` merge-commit dates).
+- **Minimal run instrumentation.** `dag.json` gains `created_at` and a
+  `remediation` flag; decisions-log lines carry a trailing ` — AT: <ISO-8601>`
+  token; escalation blocks gain `Opened:`/`Answered-at:`; the slice status sidecar
+  gains optional `started_at`/`finished_at`/`wave`/`counters` (validated
+  only-if-present by `council_contracts.py` — legacy sidecars stay valid). The
+  controller writes `metrics.json` at wave boundaries and commits the final
+  git-enriched snapshot with the runbook.
+- **Dashboard metrics view.** The web dashboard serves each run's metrics
+  (committed `metrics.json` preferred, live artifact-only recompute otherwise,
+  marked `committed`/`live`), headline pills on overview cards, and a full
+  `metrics_full` document on the run-detail endpoint; `metrics.json` participates
+  in artifact listings and ETag invalidation. `/spec-loop:dashboard` renders a
+  Run metrics section from `metrics.json` when present.
+
 - **`/spec-loop --from-plan [path]` — plan-mode handoff.** The loop can now source its
   intent from a Claude Code plan-mode plan instead of a free-text request. With no
   path it reads the most recently modified `*.md` under `~/.claude/plans/` (the
@@ -217,6 +242,10 @@ prior build. Pinned entries map to git tags `v<version>`.
   disk scans already cover the inside).
 
 ### Fixed
+- **Stale coverage OMIT ranges for `dashboard_server.py`.** The
+  `scripts/coverage_omit.txt` ranges (654-659/663-664) had drifted after the file
+  grew and were silently omitting mid-file executable lines; re-pinned to the
+  actual `serve_forever` tail and `__main__` shim.
 - **Knowledge-graph run MOC now genuinely refreshes.** The grouped listing moved into a
   managed `<!-- kg:index -->` region replaced wholesale on every build (previously the body
   was written only on first create, so Phase 5 "finalize the MOC" left the Phase 1 listing
@@ -230,6 +259,38 @@ prior build. Pinned entries map to git tags `v<version>`.
   at wave boundaries appear in the Phase 5 MOC without being re-upserted.
 
 ### Changed
+- **Claude 5 context-engineering refactor of the entire prompt surface.** Every
+  command, agent, and skill was rewritten for Claude 5-generation models
+  (Opus 5-class) per Anthropic's context-engineering guidance: rules→judgment
+  (red-flag negation lists, rationalization tables, and ALL-CAPS emphasis
+  removed), examples→interface design (embedded worked-example outputs deleted;
+  pinned output contracts are the interface), upfront→progressive disclosure
+  (a new `references/` layer — `run-state.md`, `spec-loop/phase-5-integration.md`,
+  `spec-loop/split-ingestion.md`, `spec-loop/knowledge-graph-steps.md` — loads
+  late-phase and opt-in detail only when reached; `code-review-discipline` gains a
+  linked `review-communication.md`; `systematic-debugging` now links its three
+  technique files), and repetition→single-home (the Iron Council verdict schema
+  lives only in `skills/iron-council`, the subagent-nesting rule only in
+  `skills/dispatching-parallel-agents`, the dag.json schema/wave rule/marker
+  lifecycle only in `references/run-state.md`, COMMIT-SAFETY only in the Phase 5
+  reference). Security-critical guards (untrusted-data, read-only rules,
+  commit-safety, SAFETY vetoes) are kept, compressed to standard forms. Net:
+  always-loaded prompt surface shrinks ~39% (commands 1,293→763 lines, agents
+  3,175→2,118, skills 4,783→2,923), with the hot-path controller down 60% and
+  the slice worker down 49%. All machine-validated contracts
+  (`council_contracts.py`, `quality_gate.py`) are unchanged and prose stays
+  semantically identical to them.
+- **Model-selection guidance rewritten for the Claude 5 family.**
+  `subagent-driven-development` now defaults every dispatch to `model: inherit`
+  (the session model, Opus 5-class) and reserves `model: sonnet` for cheap
+  mechanical lanes; the haiku tier and `model: opus` pins are gone.
+  `review-depth-map`'s Tier 3 rule lifts sonnet-pinned council members to the
+  session model. Cost-tiered `model: sonnet` agent pins are retained; veto-holding
+  reviewers stay `inherit`.
+- **Per-file "Provenance and maintenance" sections consolidated** into a single
+  maintainer-facing `PROVENANCE.md` (never loaded into model context), which also
+  records the deliberate divergence from the `superpowers` /
+  `pr-review-toolkit` upstreams introduced by this refactor.
 - **Dependency drop: `superpowers` is no longer required.** The controller preflight,
   slice worker, escalation-gate/quality-gate/review-depth-map skills, dashboard, and
   READMEs now reference the native `spec-loop:*` process skills; the SDD helper scripts

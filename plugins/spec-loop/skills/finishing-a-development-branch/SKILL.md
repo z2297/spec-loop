@@ -24,21 +24,11 @@ Before presenting any option, verify the project's suite passes. This is an inst
 npm test        # or: cargo test / pytest / go test ./...
 ```
 
-**If tests fail — stop. Do not proceed to Step 2.** Report:
-
-```
-Tests failing (<N> failures). Must fix before completing:
-
-[show failures]
-
-Cannot proceed with merge/PR until tests pass.
-```
-
-**If tests pass:** continue to Step 2.
+**If tests fail — stop. Do not proceed to Step 2.** Report the failures and state that merge/PR cannot proceed until they pass. **If tests pass:** continue to Step 2.
 
 ## Step 2 — Detect environment
 
-Determine the workspace state before presenting options — it selects which menu to show and how cleanup works.
+Determine the workspace state before presenting options — it selects which menu to show and how cleanup works. A **worktree** is a second working directory linked to the same repository (`git worktree`); its `git-dir` differs from the `git-common-dir` — see `spec-loop:using-git-worktrees`. A **detached HEAD** points at a commit rather than a branch, so it cannot cleanly merge *into* a base branch locally and the menu drops that option.
 
 ```bash
 GIT_DIR=$(cd "$(git rev-parse --git-dir)" 2>/dev/null && pwd -P)
@@ -50,8 +40,6 @@ GIT_COMMON=$(cd "$(git rev-parse --git-common-dir)" 2>/dev/null && pwd -P)
 | `GIT_DIR == GIT_COMMON` (normal repo) | Standard 4 options | No worktree to clean up |
 | `GIT_DIR != GIT_COMMON`, named branch (worktree) | Standard 4 options | Provenance-based (see Step 6) |
 | `GIT_DIR != GIT_COMMON`, detached HEAD | Reduced 3 options (no local merge) | None — externally managed |
-
-A **worktree** is a second working directory linked to the same repository (`git worktree`); its `git-dir` differs from the `git-common-dir`. See `spec-loop:using-git-worktrees` for how they are created and named. A **detached HEAD** means the checkout points at a commit rather than a branch — you cannot cleanly merge *into* a base branch locally, so the menu drops that option.
 
 ## Step 3 — Determine base branch
 
@@ -110,13 +98,11 @@ git merge <feature-branch>
 <test command>
 ```
 
-Only after the merge succeeds and tests pass on the result: clean up the worktree (Step 6), **then** delete the branch:
+Only after the merge succeeds and tests pass on the result: clean up the worktree (Step 6), **then** delete the branch. Order matters — `git branch -d` fails while a worktree still references the branch.
 
 ```bash
 git branch -d <feature-branch>
 ```
-
-Order matters — `git branch -d` fails while a worktree still references the branch.
 
 ### Option 2: Push and create a PR
 
@@ -143,16 +129,12 @@ This will permanently delete:
 Type 'discard' to confirm.
 ```
 
-Wait for the exact word `discard`. Only if confirmed:
+Wait for the exact word `discard`. Only if confirmed, move to the main repo root, clean up the worktree (Step 6), **then** force-delete the branch:
 
 ```bash
 MAIN_ROOT=$(git -C "$(git rev-parse --git-common-dir)/.." rev-parse --show-toplevel)
 cd "$MAIN_ROOT"
-```
-
-Then clean up the worktree (Step 6), **then** force-delete the branch:
-
-```bash
+# ... Step 6 cleanup ...
 git branch -D <feature-branch>
 ```
 
@@ -189,61 +171,10 @@ During an active `/spec-loop` run this skill's menu does **not** drive integrati
 
 So the four-option menu is for **interactive / standalone** use. A background slice worker never chooses an integration option; `spec-loop:escalation-gate` owns all human contact during a run.
 
-**The guard hook (`spec_loop_guard.py`) mechanically blocks the wrong moves during an active run** (while a `docs/spec-loop/<run-id>/.active` marker exists and before the `.publish-choice` marker): `git push` that targets the run (except in `per-slice-pr` mode, where slices legitimately push), and any `git commit` / `git merge` while sitting on `main`/`master`. Don't try to work around it — publishing the integration branch and any main-branch merge are reserved for the human's Phase 5 publish choice.
-
-## Quick reference
-
-| Option | Merge | Push | Keep worktree | Delete branch |
-|--------|-------|------|---------------|---------------|
-| 1. Merge locally | yes | — | — | yes (`-d`) |
-| 2. Create PR | — | yes | yes | — |
-| 3. Keep as-is | — | — | yes | — |
-| 4. Discard | — | — | — | yes (`-D`, force) |
+**The guard hook (`spec_loop_guard.py`) mechanically blocks the wrong moves during an active run** (while a `docs/spec-loop/<run-id>/.active` marker exists and before the `.publish-choice` marker): `git push` that targets the run (except in `per-slice-pr` mode, where slices legitimately push), and any `git commit` / `git merge` while sitting on `main`/`master`. Publishing the integration branch and any main-branch merge are reserved for the human's Phase 5 publish choice.
 
 ## When NOT to use this
 
-- **You have not finished, or tests are red.** Finish first; use `spec-loop:verification-before-completion` to establish passing evidence. This skill starts *from* a green suite.
-- **You are a background spec-loop slice worker in `single-branch` mode.** Do not run this skill — stop at a verified committed branch and let the controller integrate (see "Inside a spec-loop run").
+- **You have not finished, or tests are red.** Finish first; `spec-loop:verification-before-completion` establishes passing evidence. This skill starts *from* a green suite.
+- **You are a background spec-loop slice worker in `single-branch` mode.** Stop at a verified committed branch and let the controller integrate.
 - **You only need to create the isolated workspace, not finish it.** Use `spec-loop:using-git-worktrees`.
-- **The work isn't integration-ready and you're mid-implementation.** Keep executing your plan; come back here when it's done.
-
-## Common mistakes
-
-| Mistake | Problem | Fix |
-|---------|---------|-----|
-| Skipping test verification | Merge broken code / open a failing PR | Always verify tests before offering options (Step 1) |
-| Open-ended "what next?" | Ambiguous; invites scope creep | Present exactly the 4 (or 3) fixed options |
-| Cleaning up the worktree for Option 2 | Removes the worktree the user needs for PR iteration | Clean up for Options 1 and 4 only |
-| Deleting the branch before removing the worktree | `git branch -d` fails while the worktree references it | Merge → remove worktree → delete branch, in that order |
-| `git worktree remove` from inside the worktree | Fails silently when CWD is inside the target | `cd` to the main repo root first |
-| Cleaning up a harness-owned worktree | Removing a worktree you didn't create causes phantom state | Only remove worktrees under `.worktrees/` or `worktrees/` |
-| No confirmation for discard | Accidentally destroys work | Require the typed word `discard` |
-
-## Red flags
-
-**Never:**
-- Proceed with failing tests.
-- Merge without verifying tests on the merged result.
-- Delete work without the typed `discard` confirmation.
-- Force-push without an explicit request.
-- Remove a worktree before confirming the merge succeeded.
-- Clean up a worktree you didn't create (run the provenance check).
-- Run `git worktree remove` from inside the worktree being removed.
-- (In a run) push mid-run or merge on `main`/`master` — the guard hook blocks it and the human owns the Phase 5 publish choice.
-
-**Always:**
-- Verify tests before offering options.
-- Detect the environment before presenting the menu.
-- Present exactly 4 options (or 3 for detached HEAD).
-- Get typed confirmation for Option 4.
-- Clean up the worktree for Options 1 and 4 only.
-- `cd` to the main repo root before worktree removal, and `git worktree prune` after.
-
-## Provenance and maintenance
-
-Ported from `superpowers` v6.1.1 (github.com/obra/superpowers, MIT) `skills/finishing-a-development-branch` on 2026-07-08; adapted for spec-loop. Adaptations: added the spec-loop run-override (menu governed by `escalation-gate`; controller-owned serial merge; `per-slice-pr` = Option 2) and the guard-hook note; cross-linked `spec-loop:verification-before-completion` and `spec-loop:using-git-worktrees`; added a "When NOT to use this" section. No cross-harness content existed in the source to cut.
-
-Re-verify if things drift:
-- Sibling skill names still exist: `ls plugins/spec-loop/skills/{verification-before-completion,using-git-worktrees,escalation-gate}/SKILL.md` (the first two are authored concurrently as of 2026-07-08).
-- Run-override still matches the loop: `spec-loop-slice.md` Step 5 and `commands/spec-loop.md` Phase 3 (controller serial merge) — `grep -n "single-branch\|per-slice-pr\|finishing-a-development-branch" plugins/spec-loop/agents/spec-loop-slice.md`.
-- Guard behavior still matches: `grep -n "push\|commit\|merge\|main\|publish" plugins/spec-loop/scripts/spec_loop_guard.py`.

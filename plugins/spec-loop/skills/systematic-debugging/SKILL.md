@@ -9,9 +9,7 @@ description: Use when encountering any bug, test failure, or unexpected behavior
 
 Random fixes waste time and create new bugs. Quick patches mask underlying issues.
 
-**Core principle:** ALWAYS find root cause before attempting fixes. Symptom fixes are failure.
-
-**Violating the letter of this process is violating the spirit of debugging.**
+**Core principle:** find root cause before attempting fixes. A symptom fix is a failure, not a partial success.
 
 ## The Iron Law
 
@@ -23,303 +21,82 @@ If you haven't completed Phase 1, you cannot propose fixes.
 
 ## When to Use
 
-Use for ANY technical issue:
-- Test failures
-- Bugs in production
-- Unexpected behavior
-- Performance problems
-- Build failures
-- Integration issues
+Any technical issue: test failures, production bugs, unexpected behavior, performance problems, build failures, integration issues.
 
-**Use this ESPECIALLY when:**
-- Under time pressure (emergencies make guessing tempting)
-- "Just one quick fix" seems obvious
-- You've already tried multiple fixes
-- Previous fix didn't work
-- You don't fully understand the issue
-
-**Don't skip when:**
-- Issue seems simple (simple bugs have root causes too)
-- You're in a hurry (rushing guarantees rework)
-- Someone wants it fixed NOW (systematic is faster than thrashing)
+The pressure to skip this is highest exactly where it costs most — under a deadline, when "just one quick fix" looks obvious, when you have already tried two fixes, when you don't fully understand the issue. Simple-looking bugs have root causes too, and systematic is faster than thrashing.
 
 ## When NOT to use this
 
-- You have not yet observed a failure — there is no bug, test failure, or
-  unexpected behavior to investigate. This skill starts from a symptom.
-- You are about to *claim* work is complete/fixed/passing and need to prove it:
-  that is `spec-loop:verification-before-completion` (a hard, no-human gate), not
-  this skill. This skill finds the cause; that skill confirms the cure.
-- You are writing the failing test that Phase 4 calls for: hand off to
-  `spec-loop:test-driven-development` for the red→green→refactor mechanics.
+- **You have not yet observed a failure.** This skill starts from a symptom; there is nothing to investigate without one.
+- **You are about to claim work is complete/fixed/passing and need to prove it** → `spec-loop:verification-before-completion` (a hard, no-human gate). This skill finds the cause; that skill confirms the cure.
+- **You are writing the failing test Phase 4 calls for** → hand off to `spec-loop:test-driven-development` for the red→green→refactor mechanics.
 
 ## The Four Phases
 
-You MUST complete each phase before proceeding to the next.
+Complete each phase before proceeding to the next.
 
 ### Phase 1: Root Cause Investigation
 
-**BEFORE attempting ANY fix:**
+**Gate: you understand WHAT is happening and WHY, before any fix is proposed.**
 
-1. **Read Error Messages Carefully**
-   - Don't skip past errors or warnings
-   - They often contain the exact solution
-   - Read stack traces completely
-   - Note line numbers, file paths, error codes
-
-2. **Reproduce Consistently**
-   - Can you trigger it reliably?
-   - What are the exact steps?
-   - Does it happen every time?
-   - If not reproducible → gather more data, don't guess
-
-3. **Check Recent Changes**
-   - What changed that could cause this?
-   - Git diff, recent commits
-   - New dependencies, config changes
-   - Environmental differences
-
-4. **Gather Evidence in Multi-Component Systems**
-
-   **WHEN system has multiple components (CI → build → signing, API → service → database):**
-
-   **BEFORE proposing fixes, add diagnostic instrumentation:**
-   ```
-   For EACH component boundary:
-     - Log what data enters component
-     - Log what data exits component
-     - Verify environment/config propagation
-     - Check state at each layer
-
-   Run once to gather evidence showing WHERE it breaks
-   THEN analyze evidence to identify failing component
-   THEN investigate that specific component
-   ```
-
-   **Example (multi-layer system):**
-   ```bash
-   # Layer 1: Workflow
-   echo "=== Secrets available in workflow: ==="
-   echo "IDENTITY: ${IDENTITY:+SET}${IDENTITY:-UNSET}"
-
-   # Layer 2: Build script
-   echo "=== Env vars in build script: ==="
-   env | grep IDENTITY || echo "IDENTITY not in environment"
-
-   # Layer 3: Signing script
-   echo "=== Keychain state: ==="
-   security list-keychains
-   security find-identity -v
-
-   # Layer 4: Actual signing
-   codesign --sign "$IDENTITY" --verbose=4 "$APP"
-   ```
-
-   **This reveals:** Which layer fails (secrets → workflow ✓, workflow → build ✗)
-
-5. **Trace Data Flow**
-
-   **WHEN error is deep in call stack:**
-
-   See `root-cause-tracing.md` in this directory for the complete backward tracing technique.
-
-   **Quick version:**
-   - Where does bad value originate?
-   - What called this with bad value?
-   - Keep tracing up until you find the source
-   - Fix at source, not at symptom
+- **Read the error completely** — full stack trace, line numbers, file paths, error codes. Errors and warnings often contain the exact solution.
+- **Reproduce consistently** — exact steps, every time. Not reproducible means gather more data, not guess.
+- **Check recent changes** — git diff and recent commits, new dependencies, config changes, environmental differences.
+- **Instrument component boundaries** in multi-component systems (CI → build → signing, API → service → database). Before proposing a fix, log what data enters and exits each component, verify environment/config propagation, and check state at each layer. Run once to gather evidence showing *where* it breaks, then investigate that specific component.
+- **Trace data flow backward** when the error is deep in the call stack: where did the bad value originate, what called this with it, keep going up to the source. Fix at the source, not at the symptom.
 
 ### Phase 2: Pattern Analysis
 
-**Find the pattern before fixing:**
+**Gate: you can name every difference between what works and what is broken.**
 
-1. **Find Working Examples**
-   - Locate similar working code in same codebase
-   - What works that's similar to what's broken?
-
-2. **Compare Against References**
-   - If implementing pattern, read reference implementation COMPLETELY
-   - Don't skim - read every line
-   - Understand the pattern fully before applying
-
-3. **Identify Differences**
-   - What's different between working and broken?
-   - List every difference, however small
-   - Don't assume "that can't matter"
-
-4. **Understand Dependencies**
-   - What other components does this need?
-   - What settings, config, environment?
-   - What assumptions does it make?
+Find similar working code in the same codebase. If you are implementing a documented pattern, read the reference implementation completely — skimming guarantees you miss the line that matters. List every difference between working and broken, however small; "that can't matter" is a hypothesis, not a fact. Understand what the broken code depends on: other components, settings, config, environment, and the assumptions it makes.
 
 ### Phase 3: Hypothesis and Testing
 
-**Scientific method:**
+**Gate: one stated hypothesis, tested by one minimal change.**
 
-1. **Form Single Hypothesis**
-   - State clearly: "I think X is the root cause because Y"
-   - Write it down
-   - Be specific, not vague
-
-2. **Test Minimally**
-   - Make the SMALLEST possible change to test hypothesis
-   - One variable at a time
-   - Don't fix multiple things at once
-
-3. **Verify Before Continuing**
-   - Did it work? Yes → Phase 4
-   - Didn't work? Form NEW hypothesis
-   - DON'T add more fixes on top
-
-4. **When You Don't Know**
-   - Say "I don't understand X"
-   - Don't pretend to know
-   - Ask for help
-   - Research more
+State it explicitly — "I think X is the root cause because Y" — specific, written down. Test it with the smallest possible change, one variable at a time. If it worked, go to Phase 4. If it didn't, form a *new* hypothesis; do not stack another fix on top of the failed one. When you don't understand something, say "I don't understand X" and research it rather than proceeding on a guess.
 
 ### Phase 4: Implementation
 
-**Fix the root cause, not the symptom:**
+**Gate: a failing test exists before the fix, and passes after it.**
 
-1. **Create Failing Test Case**
-   - Simplest possible reproduction
-   - Automated test if possible
-   - One-off test script if no framework
-   - MUST have before fixing
-   - Use the `spec-loop:test-driven-development` skill for writing proper failing tests
+1. **Create the failing test case** — simplest possible reproduction, automated if a framework exists, a one-off script if not. Use `spec-loop:test-driven-development` for the mechanics.
+2. **Implement a single fix** addressing the identified root cause. One change; no "while I'm here" improvements, no bundled refactoring.
+3. **Verify** — the test passes, no other tests broke, the original issue is actually resolved.
+4. **If the fix didn't work,** stop and count your attempts. Under 3: return to Phase 1 and re-analyze with what you just learned. At 3 or more: do not attempt another fix — go to Phase 4.5.
 
-2. **Implement Single Fix**
-   - Address the root cause identified
-   - ONE change at a time
-   - No "while I'm here" improvements
-   - No bundled refactoring
+### Phase 4.5: Question the Architecture (after 3+ failed fixes)
 
-3. **Verify Fix**
-   - Test passes now?
-   - No other tests broken?
-   - Issue actually resolved?
+Three failures is a signal about the design, not about your luck. The pattern to recognize: each fix reveals new shared state or coupling somewhere else, each fix creates new symptoms elsewhere, and the real fix keeps looking like "massive refactoring."
 
-4. **If Fix Doesn't Work**
-   - STOP
-   - Count: How many fixes have you tried?
-   - If < 3: Return to Phase 1, re-analyze with new information
-   - **If ≥ 3: STOP and question the architecture (step 5 below)**
-   - DON'T attempt Fix #4 without architectural discussion
+Stop and question fundamentals: is this pattern sound, or is it being kept through inertia? Should the architecture be refactored instead of the symptoms patched? Discuss with your human partner before attempting more fixes.
 
-5. **If 3+ Fixes Failed: Question Architecture (Phase 4.5)**
-
-   **Pattern indicating architectural problem:**
-   - Each fix reveals new shared state/coupling/problem in different place
-   - Fixes require "massive refactoring" to implement
-   - Each fix creates new symptoms elsewhere
-
-   **STOP and question fundamentals:**
-   - Is this pattern fundamentally sound?
-   - Are we "sticking with it through sheer inertia"?
-   - Should we refactor architecture vs. continue fixing symptoms?
-
-   **Discuss with your human partner before attempting more fixes.**
-
-   > **Inside a spec-loop run:** this "discuss with your human partner" gate is
-   > governed by `spec-loop:escalation-gate` — do NOT stop the loop to ask
-   > directly. The 3-fixes-failed / question-the-architecture condition is a
-   > material-assumption + ambiguity trigger: route it through the escalation
-   > gate (batched at the wave boundary), which decides proceed-and-log vs.
-   > surface to the human and records the decision. Outside a run (interactive
-   > use), the gate applies as written — talk to your human partner directly.
-
-   This is NOT a failed hypothesis - this is a wrong architecture.
-
-## Red Flags - STOP and Follow Process
-
-If you catch yourself thinking:
-- "Quick fix for now, investigate later"
-- "Just try changing X and see if it works"
-- "Add multiple changes, run tests"
-- "Skip the test, I'll manually verify"
-- "It's probably X, let me fix that"
-- "I don't fully understand but this might work"
-- "Pattern says X but I'll adapt it differently"
-- "Here are the main problems: [lists fixes without investigation]"
-- Proposing solutions before tracing data flow
-- **"One more fix attempt" (when already tried 2+)**
-- **Each fix reveals new problem in different place**
-
-**ALL of these mean: STOP. Return to Phase 1.**
-
-**If 3+ fixes failed:** Question the architecture (see Phase 4.5).
-
-## Signals You're Doing It Wrong
-
-**Watch for these redirections from your human partner (or, inside a run, from a
-review BLOCK or escalation):**
-- "Is that not happening?" - You assumed without verifying
-- "Will it show us...?" - You should have added evidence gathering
-- "Stop guessing" - You're proposing fixes without understanding
-- "Ultra-think this" - Question fundamentals, not just symptoms
-- "We're stuck?" (frustrated) - Your approach isn't working
-
-**When you see these:** STOP. Return to Phase 1.
-
-## Common Rationalizations
-
-| Excuse | Reality |
-|--------|---------|
-| "Issue is simple, don't need process" | Simple issues have root causes too. Process is fast for simple bugs. |
-| "Emergency, no time for process" | Systematic debugging is FASTER than guess-and-check thrashing. |
-| "Just try this first, then investigate" | First fix sets the pattern. Do it right from the start. |
-| "I'll write test after confirming fix works" | Untested fixes don't stick. Test first proves it. |
-| "Multiple fixes at once saves time" | Can't isolate what worked. Causes new bugs. |
-| "Reference too long, I'll adapt the pattern" | Partial understanding guarantees bugs. Read it completely. |
-| "I see the problem, let me fix it" | Seeing symptoms ≠ understanding root cause. |
-| "One more fix attempt" (after 2+ failures) | 3+ failures = architectural problem. Question pattern, don't fix again. |
+> **Inside a spec-loop run:** this human gate is governed by `spec-loop:escalation-gate` — do not stop the loop to ask directly. The 3-fixes-failed condition is a material-assumption + ambiguity trigger: route it through the gate (batched at the wave boundary), which decides proceed-and-log vs. surface to the human and records the decision. Outside a run, talk to your human partner directly.
 
 ## Quick Reference
 
-| Phase | Key Activities | Success Criteria |
-|-------|---------------|------------------|
-| **1. Root Cause** | Read errors, reproduce, check changes, gather evidence | Understand WHAT and WHY |
-| **2. Pattern** | Find working examples, compare | Identify differences |
-| **3. Hypothesis** | Form theory, test minimally | Confirmed or new hypothesis |
-| **4. Implementation** | Create test, fix, verify | Bug resolved, tests pass |
+| Phase | Key activities | Gate |
+|-------|---------------|------|
+| **1. Root Cause** | Read errors, reproduce, check changes, instrument boundaries, trace backward | Understand WHAT and WHY |
+| **2. Pattern** | Find working examples, read references fully, list differences | Every difference identified |
+| **3. Hypothesis** | State one theory, test minimally | Confirmed, or a new hypothesis |
+| **4. Implementation** | Failing test, single fix, verify | Bug resolved, tests pass |
+| **4.5. Architecture** | After 3 failed fixes: question the pattern | Human decision (via escalation-gate in a run) |
 
 ## When Process Reveals "No Root Cause"
 
-If systematic investigation reveals issue is truly environmental, timing-dependent, or external:
-
-1. You've completed the process
-2. Document what you investigated
-3. Implement appropriate handling (retry, timeout, error message)
-4. Add monitoring/logging for future investigation
-
-**But:** 95% of "no root cause" cases are incomplete investigation.
+If systematic investigation shows the issue is truly environmental, timing-dependent, or external: document what you investigated, implement appropriate handling (retry, timeout, clear error message), and add monitoring or logging for future investigation. But treat this conclusion with suspicion — most "no root cause" cases are incomplete investigation.
 
 ## Supporting Techniques
 
-These techniques are part of systematic debugging and available in this directory:
+Load these from this directory when the situation calls for them:
 
-- **`root-cause-tracing.md`** - Trace bugs backward through call stack to find original trigger
-- **`defense-in-depth.md`** - Add validation at multiple layers after finding root cause
-- **`condition-based-waiting.md`** - Replace arbitrary timeouts with condition polling
-- **`find-polluter.sh`** - Bisect a test suite to find which test creates unwanted files/state
+- [root-cause-tracing.md](root-cause-tracing.md) — when the error surfaces deep in a call stack and you need the full backward-tracing technique for Phase 1.
+- [defense-in-depth.md](defense-in-depth.md) — after the root cause is found, when a bad value should be caught at more than one layer.
+- [condition-based-waiting.md](condition-based-waiting.md) — when the bug is a flaky timing failure and the code waits on arbitrary timeouts.
+- `find-polluter.sh` — bisect a test suite to find which test creates unwanted files or state.
 
 **Related skills:**
-- **`spec-loop:test-driven-development`** - For creating the failing test case (Phase 4, Step 1)
-- **`spec-loop:verification-before-completion`** - Verify the fix worked before claiming success (never overridden, even inside a run)
-
-## Real-World Impact
-
-From debugging sessions:
-- Systematic approach: 15-30 minutes to fix
-- Random fixes approach: 2-3 hours of thrashing
-- First-time fix rate: 95% vs 40%
-- New bugs introduced: Near zero vs common
-
-## Provenance and maintenance
-
-Ported from `superpowers` v6.1.1 (github.com/obra/superpowers, MIT) `skills/systematic-debugging` on 2026-07-08; adapted for spec-loop. Skill-test fixtures from the source (`test-academic.md`, `test-pressure-1/2/3.md`, `CREATION-LOG.md`) were NOT ported — they exercise the source authors' skill-testing harness, not this skill's behavior. The only behavioral adaptation is Phase 4.5's human gate, which is routed through `spec-loop:escalation-gate` inside an active run.
-
-Re-verify if things drift:
-- Sibling skills exist: `ls plugins/spec-loop/skills/{test-driven-development,verification-before-completion,escalation-gate}/SKILL.md`
-- Supporting files present and script runnable: `ls plugins/spec-loop/skills/systematic-debugging/ && bash -n plugins/spec-loop/skills/systematic-debugging/find-polluter.sh`
-- Escalation-gate override wording stays consistent: `sed -n '12,18p' plugins/spec-loop/skills/escalation-gate/SKILL.md`
+- `spec-loop:test-driven-development` — for creating the failing test case (Phase 4, step 1).
+- `spec-loop:verification-before-completion` — verify the fix worked before claiming success (never overridden, even inside a run).

@@ -29,6 +29,7 @@ dispatch nested subagents (see `plugins/spec-loop/agents/spec-loop-slice.md`, St
 ## The process
 
 ### Step 1: Load and review the plan
+
 1. Read the plan file (under `docs/spec-loop/plans/` unless told otherwise).
 2. Review it critically — identify any questions or concerns about the approach,
    the task ordering, missing prerequisites, or steps you do not understand.
@@ -36,9 +37,13 @@ dispatch nested subagents (see `plugins/spec-loop/agents/spec-loop-slice.md`, St
    below for who receives them).
 4. **If no concerns:** create a todo per plan task and proceed to Step 2.
 
+Return to this step if the plan is updated on your feedback, or if the fundamental
+approach needs rethinking.
+
 ### Step 2: Execute tasks
 
 For each task, in order:
+
 1. Mark the todo **in_progress**.
 2. Follow each step **exactly** — the plan has bite-sized steps; do not improvise or
    batch them.
@@ -51,20 +56,17 @@ a task that writes code), invoke that skill and follow it.
 ### Step 3: Complete development
 
 After **all** tasks are complete and verified:
+
 - Announce: "I'm using the finishing-a-development-branch skill to complete this work."
 - **REQUIRED SUB-SKILL:** `spec-loop:finishing-a-development-branch` — follow it to
   verify tests, present integration options, and execute the chosen one.
 
 ## When to stop and ask for help
 
-**STOP executing immediately when:**
-- You hit a blocker — a missing dependency, a failing test you cannot fix from
-  context, or an instruction that is unclear.
-- The plan has critical gaps that prevent you from starting a task.
-- You do not understand an instruction.
-- A verification fails repeatedly.
-
-**Ask for clarification rather than guessing.** Do not force through a blocker.
+**STOP executing immediately** on a blocker — a missing dependency, a failing test you
+cannot fix from context, a critical gap that prevents you from starting a task, an
+instruction you do not understand, or a verification that fails repeatedly. Ask for
+clarification rather than guessing; do not force through it.
 
 > **Inside a spec-loop run:** these stop-and-ask conditions are governed by
 > `spec-loop:escalation-gate`. A slice worker does not prompt the human directly — it
@@ -76,12 +78,6 @@ After **all** tasks are complete and verified:
 >
 > `spec-loop:verification-before-completion` is **never** overridden — do not skip a
 > task's verifications or claim completion without running them, run or no run.
-
-## When to revisit earlier steps
-
-**Return to review (Step 1) when:**
-- The plan is updated based on your feedback.
-- The fundamental approach needs rethinking.
 
 ## Never start on main/master
 
@@ -95,14 +91,6 @@ consent**. Ensure an isolated workspace exists first via
 > prompted for branch consent mid-run. Outside a run, the explicit-consent rule applies
 > as written.
 
-## Remember
-- Review the plan critically first.
-- Follow plan steps exactly.
-- Don't skip verifications.
-- Invoke the skills the plan references.
-- Stop when blocked — don't guess.
-- Never start implementation on `main`/`master` without explicit user consent.
-
 ## When NOT to use this
 
 - **You can dispatch subagents** → use `spec-loop:subagent-driven-development` instead;
@@ -111,29 +99,3 @@ consent**. Ensure an isolated workspace exists first via
 - **You don't have a written plan yet** → use `spec-loop:writing-plans` first.
 - **You need an isolated workspace** → `spec-loop:using-git-worktrees` sets that up
   before execution begins.
-
-## Integration
-
-Related skills:
-- `spec-loop:subagent-driven-development` — the preferred execution path when subagents
-  are available.
-- `spec-loop:using-git-worktrees` — ensures the isolated workspace this skill runs in.
-- `spec-loop:writing-plans` — creates the plan this skill executes.
-- `spec-loop:test-driven-development` — the discipline plan tasks invoke to write code.
-- `spec-loop:verification-before-completion` — the hard, no-human gate on every
-  completion claim (never overridden).
-- `spec-loop:finishing-a-development-branch` — completes the work after all tasks pass.
-
-## Provenance and maintenance
-
-Ported from `superpowers` v6.1.1 (github.com/obra/superpowers, MIT)
-`skills/executing-plans` on 2026-07-08; adapted for spec-loop. Cut the cross-harness
-platform note and the `../using-superpowers/references/` per-platform tool-ref pointer;
-reframed the "prefer subagents" note around `spec-loop:subagent-driven-development` and
-the subagent-nesting constraint; added the spec-loop run-override notes and the
-"When NOT to use this" section.
-
-Re-verify if things drift:
-- Sibling skills exist: `ls plugins/spec-loop/skills/{subagent-driven-development,using-git-worktrees,writing-plans,test-driven-development,verification-before-completion,finishing-a-development-branch}/SKILL.md`
-- Slice-worker fallback still matches: `grep -n "executing-plans" plugins/spec-loop/agents/spec-loop-slice.md`
-- Escalation-gate override wording still current: `sed -n '12,17p' plugins/spec-loop/skills/escalation-gate/SKILL.md`
