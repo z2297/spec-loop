@@ -49,6 +49,13 @@ continue):
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/run_metrics.py" compute "docs/spec-loop/<run-id>" --git --write
 ```
 
+Include token usage when the transcript store is findable, same probe as the
+Phase 3 refresh: candidate dir `~/.claude/projects/<cwd with every "/" and "."
+replaced by "-">`; `grep -l "<run-id>" <dir>/*.jsonl` matches → append
+`--transcripts <dir>`, else omit and log one line. No `--usd-per-mtok-*` rates
+are wired by default (the plugin bundles no pricing); a human wanting a USD
+figure re-runs `compute` with those flags.
+
 ## 5. Commit the run state — COMMIT-SAFETY
 
 Commit the whole run-state directory onto the integration branch so the runbook

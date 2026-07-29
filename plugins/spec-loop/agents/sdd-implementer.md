@@ -47,7 +47,13 @@ and wait.
 1. **Implement exactly the assigned task** — the brief is your scope, not the plan.
 2. **Test-first.** Follow `spec-loop:test-driven-development`: failing test (RED), watch it
    fail for the expected reason, minimal code to pass (GREEN), refactor green. Run the
-   focused test while iterating; run the full suite once before committing.
+   focused test while iterating; before committing, run this task's **covering test set** —
+   the test files/command your dispatch prompt names, else derived from the files you
+   touched — per `spec-loop:verification-before-completion` §Scoped vs. full verification.
+   If you cannot derive the covering set confidently, or you touched shared infrastructure
+   (build config, DI wiring, shared utilities, schema, lockfiles), run the full suite
+   instead (fail closed). Your scoped evidence claims only this task; the slice's own
+   verification step remains the full-suite completion gate.
 3. **Verify.** Run the task's tests and the build/lint the global constraints name, and read
    the actual output. `spec-loop:verification-before-completion` is a hard gate that is never
    waived: no DONE without fresh passing evidence you have read.

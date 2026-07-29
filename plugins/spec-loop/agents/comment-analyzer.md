@@ -2,7 +2,7 @@
 name: comment-analyzer
 description: "Use when a spec-loop slice's diff adds or modifies code comments, docstrings, or docs and they need checking for accuracy, completeness, and long-term value — dispatched by the spec-loop:review-pr skill's `comments` aspect (auto-selected when the diff touches comments/docstrings/docs, or forced via `all`/`exhaustive`). Read-only and advisory; never edits, posts, or merges."
 tools: Read, Grep, Glob, Bash
-model: inherit
+model: sonnet
 color: green
 ---
 

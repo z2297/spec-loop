@@ -56,6 +56,29 @@ nothing.
   controller delegates, a subagent that says "done" has proven nothing until its diff is
   on disk and you have read it.
 
+## Scoped vs. full verification (single home)
+
+Scoping narrows the *claim*, never the *gate*. Two rules:
+
+1. **Scoped test evidence.** A *task-level* completion claim (one task inside a slice)
+   may be verified by the task's **covering tests** — the test files/filters that
+   exercise the files the task touched, named by the dispatcher or derived from the
+   diff (`npm test -- <paths>`, `pytest <paths>`, `go test ./pkg/...`,
+   `dotnet test --filter`, …). If the covering set cannot be derived confidently, or
+   the change touches shared infrastructure (build config, DI wiring, shared
+   utilities, schema, lockfiles), run the full suite — ambiguity never narrows the
+   scope. Scoped evidence never substitutes for the three **full-suite checkpoints**,
+   which may never be scoped: **(a)** slice verification before `DONE`, **(b)** the
+   controller's wave integration gate, **(c)** the Phase 5 integration gate.
+2. **Evidence transfer by tree identity.** Fresh full-suite evidence attaches to a
+   *git tree*, not a branch: if `git rev-parse <A>^{tree}` equals the tree the suite
+   was verifiably run on (command + result + tree SHA recorded), the claim "this tree
+   is green" transfers without re-running. Any tree mismatch, missing record, or
+   doubt → run the suite (fail closed). This is the only sanctioned way to skip a
+   full-suite run, and it never applies to checkpoints (a) or (c) — a slice always
+   runs its own Step-5 suite (that run is the very evidence checkpoint (b) may
+   transfer), and the Phase 5 gate always runs fresh.
+
 ## This gate is never overridden by the autonomy contract
 
 **Pinned.** During an active spec-loop run, `spec-loop:escalation-gate` governs every
@@ -64,7 +87,8 @@ surfacing). It does **not** govern this one. `verification-before-completion` is
 no-human, evidence-before-claims gate and it stays in force at every layer of a run:
 
 - **Slice worker** — a slice may not return `DONE` until its full test/build command has
-  been run fresh and read in the same message (slice verification step).
+  been run fresh and read in the same message (slice verification step); scoped task
+  runs earlier in the slice never satisfy this.
 - **Controller merge gate** — the controller may not merge a slice into the integration
   branch on the slice's word alone; the merge gate stands on fresh evidence, not on the
   slice's self-report.

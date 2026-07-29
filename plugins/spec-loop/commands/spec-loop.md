@@ -119,7 +119,15 @@ on `main` — each gets its own worktree branched off the integration branch.
    `escalation-gate` and ask the human to commit or stash. Record `base_ref`,
    `base_sha` (`git rev-parse HEAD`), and the run's `merge_mode`. Ensure
    `.worktrees/` is gitignored.
-3. Create `docs/spec-loop/<run-id>/` and write the artifacts defined in
+3. **Baseline the integration branch (full suite, once).** Run the project's full
+   test/build fresh on the new branch and read the output. Green → record the
+   attestation `{tree_sha (git rev-parse HEAD^{tree}), command, result}` as a
+   decisions-log line and hold it for Phase 2 dispatches (evidence transfer per
+   `spec-loop:verification-before-completion` §Scoped vs. full verification). Red →
+   a pre-existing condition: run `escalation-gate` and ask the human BEFORE
+   dispatching any slice — today's alternative is every wave-1 slice discovering
+   it independently.
+4. Create `docs/spec-loop/<run-id>/` and write the artifacts defined in
    `${CLAUDE_PLUGIN_ROOT}/references/run-state.md`: the `.active` marker,
    `request.md` (verbatim request; under `--from-plan`, the plan content with a
    `Source:` line), `dag.json` (slices with tiers assigned via `review-depth-map`,
@@ -127,9 +135,9 @@ on `main` — each gets its own worktree branched off the integration branch.
    `conventions.md`, and empty `escalations.md` / `decisions-log.md`. Every
    decisions-log line you append carries the trailing ` — AT: <ISO-8601 UTC>`
    token.
-4. Sanity-check the DAG: no cycles, every `deps` id exists (a cycle is a
+5. Sanity-check the DAG: no cycles, every `deps` id exists (a cycle is a
    decomposition error — collapse the cyclic slices into one and log it).
-5. If the knowledge graph is enabled, seed it per the KG reference's run-seed step.
+6. If the knowledge graph is enabled, seed it per the KG reference's run-seed step.
 
 ## Phase 2 — Schedule waves
 
@@ -142,7 +150,11 @@ see `spec-loop:dispatching-parallel-agents` §Subagent nesting).
    single message, each `run_in_background: true`. Pass each agent: its slice
    object, the `run-id` and absolute run-state path, `base_ref`, `merge_mode`,
    the quality-gate config path, the `conventions.md` path, the run's
-   `shared_constraints`, and the wave index (1-based). Put the bare slice id in
+   `shared_constraints`, and the wave index (1-based). When you have verified the
+   **current tip** of `base_ref` green — the Phase 1 baseline, or the previous
+   wave's integration check — and the tip has not moved since, also pass
+   `baseline_attestation` `{tree_sha, command, result}` so the slice can skip its
+   duplicate baseline run; omit it in any other case. Put the bare slice id in
    each dispatch's Task `description` — the seam `run_metrics.py` uses to
    attribute token usage. If the knowledge graph is enabled, inject per-slice
    prior-knowledge sections per the KG reference's wave pre-fetch step.
@@ -172,6 +184,19 @@ see `spec-loop:dispatching-parallel-agents` §Subagent nesting).
      Phase 5 reference) and leave the unmerged branch for it.
    - Per-wave integration check: run the full test/build fresh on `base_ref` and
      read the output. Red → open a remediation slice; do not advance as if clean.
+     **Single-slice wave skip:** if this wave merged exactly ONE slice and
+     `git rev-parse base_ref^{tree}` equals that slice branch's HEAD tree
+     (capture it before deleting the branch), the slice's fresh full-suite
+     evidence transfers by tree identity
+     (`spec-loop:verification-before-completion` §Scoped vs. full verification) —
+     log the attestation to `decisions-log.md` and skip the re-run. Any other
+     case (two or more slices merged, tree mismatch, missing full-suite evidence
+     in the sidecar/report) runs the check as above; multi-slice waves never skip.
+   - A green integration check (run or transferred) becomes the
+     `baseline_attestation` for the next wave's dispatches (Phase 2):
+     `tree_sha` = `git rev-parse base_ref^{tree}` now; `command`/`result` = the
+     check you ran, or on a transferred skip the merged slice's sidecar
+     `tests.command`/`tests.result`.
    - *(`per-slice-pr` mode: slices opened their own PRs — skip the merge; the
      Phase 5 reference covers integration verification.)*
 4. Collect ALL `OPEN` entries from `escalations.md` into ONE batched
@@ -183,6 +208,10 @@ see `spec-loop:dispatching-parallel-agents` §Subagent nesting).
    the KG reference's wave-decisions step.
 6. Refresh metrics (non-gating; on error log one line and continue):
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/run_metrics.py" compute "docs/spec-loop/<run-id>" --write`
+   Include token usage when the transcript store is findable: the candidate dir is
+   `~/.claude/projects/<cwd with every "/" and "." replaced by "-">`; probe with
+   `grep -l "<run-id>" <dir>/*.jsonl` and append `--transcripts <dir>` only on a
+   match — otherwise omit the flag and log one line.
 
 ## Phase 4 — Loop
 

@@ -42,10 +42,15 @@ human itself.
    and identically at the top of every member's prompt (identical prefixes earn
    prompt-cache hits). It contains: the subject under review and its kind
    (verbatim request, or plan + slice object), the run's `conventions.md`
-   (content if small, else its path), the `shared_constraints`, the run-state
-   directory path, at pre-execution the files the plan names, and this skill's
-   **member output contract** (below). The packet is a floor, not a ceiling —
-   members explore the codebase read-only beyond it as their mandate needs.
+   **path**, the `shared_constraints`, the run-state directory path, at
+   pre-execution the paths of the files the plan names, and this skill's
+   **member output contract** (below). Every packet artifact (plan, conventions,
+   named files) is handed as a file path, never pasted — pasted packets stay
+   resident in the convener's context × N dispatches (see
+   `spec-loop:subagent-driven-development` §File Handoffs); identical path lists
+   keep the packet byte-identical across members, preserving the cache-prefix
+   property. The packet is a floor, not a ceiling — members explore the codebase
+   read-only beyond it as their mandate needs.
    Subagent callers dispatch synchronously in one message — see
    `spec-loop:dispatching-parallel-agents` §Subagent nesting.
 3. **Validate every reply mechanically — never hand-parse.** Pipe each member's
@@ -113,7 +118,9 @@ Real-but-out-of-scope concerns are logged as DEFERRED, not silently dropped.
 **Split special case (pre-execution only).** A right-sizing finding that the
 plan is two-or-more independently shippable changes — from the Pragmatist or
 Architect, as concern or OBJECT — routes to **dynamic decomposition** (the slice
-worker returns `SPLIT`), autonomously, never to the human. It short-circuits
+worker returns `SPLIT`), autonomously, never to the human. (The slice worker
+also self-assesses size before convening — see `spec-loop:spec-loop-slice`; the
+council is the second net, not the trigger.) It short-circuits
 only the size dimension: any other objection in the same round aggregates
 normally, and a slice already at the split-depth cap routes its right-sizing
 OBJECT to the human like any other. At intake, right-sizing concerns just fold

@@ -38,8 +38,8 @@ This skill dispatches the plugin's named agent types, not raw `general-purpose` 
 
 1. Read the plan once; note project context and Global Constraints; create todos; check the progress ledger.
 2. Pre-Flight Plan Review — batch any conflicts to the human before Task 1.
-3. Per task, in order: record `BASE`; `task-brief` → brief file; dispatch `spec-loop:sdd-implementer`; handle its status; `review-package BASE HEAD` → diff file; dispatch `spec-loop:sdd-task-reviewer`; loop fix-agent → re-review until spec-compliant AND quality Approved; mark complete in todos AND the ledger.
-4. After the last task: `review-package MERGE_BASE HEAD`; dispatch `spec-loop:code-reviewer` once; if it returns findings, dispatch ONE fix agent with the whole list, then re-review.
+3. Per task, in order: record `BASE`; `task-brief` → brief file; dispatch `spec-loop:sdd-implementer`; handle its status; `review-package BASE HEAD` → diff file; dispatch `spec-loop:sdd-task-reviewer`; loop fix-agent → re-review until spec-compliant AND quality Approved — budget: **3 fix rounds per task**, and every round must change something (more context, a higher model tier, or a smaller split), never the same prompt to the same model. Budget exhausted with the reviewer still not Approved → an unfixable review block: inside a run, `spec-loop:escalation-gate` (trigger `review-block`) → `escalations.md` → `NEEDS_DECISION`; interactive use, present the findings and attempts to the human. Otherwise mark complete in todos AND the ledger.
+4. After the last task (interactive use — inside a spec-loop run this review is subsumed into the slice worker's Step 3; see §Inside a spec-loop run): `review-package MERGE_BASE HEAD`; dispatch `spec-loop:code-reviewer` once; if it returns findings, dispatch ONE fix agent with the whole list, then re-review.
 5. Hand off to `spec-loop:finishing-a-development-branch`.
 
 ## Pre-Flight Plan Review
@@ -92,8 +92,8 @@ Per-task reviews are task-scoped gates. The broad review happens once, at the fi
 - **Global constraints, verbatim.** The global-constraints block you hand the reviewer is its attention lens. Copy the binding requirements verbatim from the plan's Global Constraints section or the spec: exact values, exact formats, and the stated relationships between components ("same layout as X", "matches Y"). The agent's own definition already carries the process rules (YAGNI, test hygiene, review method) — the constraints block is for what THIS project's spec demands.
 - **Hand diffs as files.** Run `review-package BASE HEAD` (below) and pass the reviewer the file path it prints. The output never enters your own context, and the reviewer sees the commit list, stat summary, and full diff with context in one Read call.
 - **One task per dispatch, never session history.** A dispatch prompt describes one task, not the session's history. Do not paste accumulated prior-task summaries ("state after Tasks 1-3") into later dispatches — a real session's dispatch hit 42k chars of which 99% was pasted history. A fresh agent needs its task, the interfaces it touches, and the global constraints. Nothing else.
-- **Fix dispatches carry the implementer contract.** Dispatch fix agents (`spec-loop:sdd-implementer`) for Critical and Important findings. The fix agent re-runs the tests covering its change and reports the results — name the covering test files in the dispatch; a one-line fix does not need the whole suite. Before re-dispatching the reviewer, confirm the fix report contains the covering tests, the command run, and the output.
-- **Record Minor findings** in the progress ledger as you go, and point the final whole-branch review at that list so it can triage which must be fixed before merge. A roll-up nobody reads is a silent discard.
+- **Fix dispatches carry the implementer contract.** Dispatch fix agents (`spec-loop:sdd-implementer`) for Critical and Important findings. The fix agent re-runs the tests covering its change and reports the results — name the covering test files in the dispatch (scoping rules: `spec-loop:verification-before-completion` §Scoped vs. full verification); a one-line fix does not need the whole suite. Before re-dispatching the reviewer, confirm the fix report contains the covering tests, the command run, and the output.
+- **Record Minor findings** in the progress ledger as you go, and point the final whole-branch review at that list so it can triage which must be fixed before merge (inside a run, that list goes into the slice worker's Step 3 combined review dispatch instead). A roll-up nobody reads is a silent discard.
 - **Plan-mandated findings are the human's call.** A finding labeled plan-mandated — or any finding that conflicts with what the plan's text requires — is the human's decision, like any plan contradiction: present the finding and the plan text, ask which governs. (Inside a run: route via `spec-loop:escalation-gate`.)
 - **One final-review fix agent.** If the final whole-branch review returns findings, dispatch ONE fix agent with the complete findings list — not one fixer per finding. Per-finding fixers each rebuild context and re-run suites; a real session's final-review fix wave cost more than all its tasks combined.
 
@@ -127,6 +127,8 @@ prompt:
   - Global constraints, verbatim from the plan/spec
   - The model choice rationale (why this tier)
   - Instruction: if you have questions, return NEEDS_CONTEXT — do not guess
+  - Covering test scope: the test files/command that cover this task (from the
+    plan's per-task test cycle); write `full suite` when you cannot name them
   - (fix dispatch only) the findings to fix + the covering test files to re-run
 ```
 
@@ -162,7 +164,7 @@ Returns: assessment ending "Ready to merge? Yes | No | With fixes".
 
 ## File Handoffs
 
-Everything you paste into a dispatch prompt — and everything an agent prints back — stays resident in your context for the rest of the session and is re-read on every later turn. **Pasted text stays resident = the anti-pattern.** Hand artifacts over as files:
+Canonical statement — every spec-loop dispatcher (slice worker, council convener, review-pr caller) points here. Everything you paste into a dispatch prompt — and everything an agent prints back — stays resident in your context for the rest of the session and is re-read on every later turn. **Pasted text stays resident = the anti-pattern.** Hand artifacts over as files:
 
 - **Task brief:** before dispatching an implementer, run
   `"${CLAUDE_PLUGIN_ROOT}/skills/subagent-driven-development/scripts/task-brief" PLAN_FILE N` — it extracts the task's full text to a uniquely named file and prints the path. The brief is the single source of requirements. Exact values (numbers, magic strings, signatures, test cases) appear **only** in the brief, never pasted into the dispatch.
@@ -188,7 +190,9 @@ Conversation memory does not survive compaction. In real sessions, controllers t
 
 ## Inside a spec-loop run
 
-This skill is the engine of a spec-loop slice worker's Step 2. Two rules apply during an active run:
+This skill is the engine of a spec-loop slice worker's Step 2. Three rules apply during an active run:
+
+- **The final whole-branch review is subsumed.** The slice worker folds this skill's final `spec-loop:code-reviewer` pass into its Step 3 review dispatch (one combined single-message round with the review-pr aspects) — do not run a standalone `code-reviewer` round first. Hand the Minor-findings ledger roll-up to that Step 3 dispatch. The slice diff package (`slice-base..HEAD`) stands in for this skill's `MERGE_BASE` package — inside a run the slice base IS the merge base (the worktree was cut from the integration branch's tip) — and the slice's Step 3b/4 pipeline replaces this skill's one-fix-agent-then-re-review step.
 
 - **Nesting rule.** From inside any agent, every dispatch MUST be `run_in_background: false` — see `spec-loop:dispatching-parallel-agents` §Subagent nesting for the full rule. The slice worker runs tasks sequentially anyway (one implementer at a time, never parallel), so synchronous is both mandatory and correct.
 - **Autonomy override.** Every human gate in this skill — Pre-Flight conflicts, consent-before-`main`, a `BLOCKED` you cannot resolve, plan-mandated findings — is governed by `spec-loop:escalation-gate` during a run. The slice worker always works in a **dedicated worktree** (so consent-before-`main` is already satisfied) and escalates by writing to `escalations.md` and returning `NEEDS_DECISION` rather than prompting the human directly. Outside a run (interactive use), the gates apply as written. `spec-loop:verification-before-completion` is never overridden — it is a hard, no-human gate.

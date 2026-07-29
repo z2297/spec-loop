@@ -1,7 +1,8 @@
 # Ingesting a SPLIT (dynamic decomposition)
 
 Loaded by the controller when a slice returns `SPLIT`. Read the proposal at
-`docs/spec-loop/<run-id>/slice-<id>-split.json` (shape: `references/run-state.md`)
+`docs/spec-loop/<run-id>/slice-<id>-split.json` (shape:
+`${CLAUDE_PLUGIN_ROOT}/references/run-state.md`)
 and graft the children into `dag.json`:
 
 1. Insert each child as a `pending` slice with id `<parent-id>.1`, `<parent-id>.2`, …,

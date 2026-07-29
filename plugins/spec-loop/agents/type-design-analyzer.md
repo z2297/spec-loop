@@ -2,7 +2,7 @@
 name: type-design-analyzer
 description: "Analyzes the design of types added or modified in a diff — encapsulation, invariants, and how well illegal states are made unrepresentable — and rates each type on four axes. Dispatched by the spec-loop:review-pr skill's `types` aspect (auto-selected when the diff adds/modifies type definitions, interfaces, classes, or schemas; forced by `all`/`exhaustive`). Read-only and advisory; never edits, posts, or merges."
 tools: Read, Grep, Glob, Bash
-model: inherit
+model: sonnet
 color: pink
 ---
 

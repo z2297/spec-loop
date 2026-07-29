@@ -103,8 +103,11 @@ Otherwise, for each failing item, run a refactor pass (budget =
    parameter object, split a god class. Never change observable behavior, public
    signatures, contracts, or outputs.
 2. **Keep tests green.** The existing tests must stay green through every pass. Re-run
-   the slice's tests after each refactor; if a change reddens them or alters behavior,
-   revert it and try a different transformation.
+   the tests **covering the refactored code** after each refactor (scoped per
+   `spec-loop:verification-before-completion` §Scoped vs. full verification; covering
+   set unclear → the slice's full suite); if a change reddens them or alters behavior,
+   revert it and try a different transformation. The slice's verification-step full run
+   remains the behavioral safety net.
 3. **Re-measure** by re-running the gate script (Step 2) against the current worktree;
    its fresh report is the authoritative check. Stop early once all items pass.
 

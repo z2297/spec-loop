@@ -13,17 +13,23 @@ The risk tier is written into the plan's metadata header by the slice worker dur
 
 ## Risk tier → review scope
 
+The tier also scales model economics: agent frontmatter `model:` pins are the cost
+defaults, and this file is the single home of the tier-scaled overrides that lift
+or lower them.
+
 ### Tier 1 — Low risk
 Docs, config, comments, isolated pure functions, no behavioral surface.
 - Run: `spec-loop:review-pr code`
-- Mode: sequential
+- Mode: parallel (default — moot at Tier 1, which dispatches a single aspect)
+- Model: dispatch `guideline-reviewer` with a per-call `model: sonnet` override —
+  no behavioral surface, and the Tier-1 bar is P0-only.
 - Blocking bar: **P0 blocks.** P1/P2 logged, not blocking.
 - Council: **reduced** — `iron-council-pragmatist` + `iron-council-guardian`.
 
 ### Tier 2 — Standard (default)
 Normal feature logic, internal modules, no auth/data/contract surface.
 - Run: `spec-loop:review-pr` (default — auto-selects aspects from the diff: adds test/comment/error/type analyzers when those files change)
-- Mode: sequential (or `all parallel` if the diff is large)
+- Mode: parallel (default)
 - Blocking bar: **P0 and P1 block.** P2 logged.
 - Council: **full five.**
 
@@ -47,9 +53,12 @@ half of N objects → OBJECT).
 - **Tier 3** → full five **at high effort**: give every member an explicit
   deep-review mandate in its dispatch prompt (read every file the plan names, trace
   the risky paths end-to-end, verify test coverage of them), and where the dispatch
-  surface supports a per-call `model` override, lift the members pinned to
-  `model: sonnet` up to the session model (Opus 5-class) for this convening — the
-  pin is a cost default, not a capability ceiling.
+  surface supports a per-call `model` override, lift **every** sonnet-pinned agent
+  convened for the slice — council members AND review aspect agents — up to the
+  session model (Opus 5-class) for this slice: the pin is a cost default, not a
+  capability ceiling. The one exception is `review-finding-verifier`, which stays
+  sonnet at every tier — its CONFIRMED-by-default calibration makes model weakness
+  fail safe.
 
 This applies at **pre-execution only** — intake (controller, Phase 0) always
 convenes the full five, since no tier exists before decomposition and

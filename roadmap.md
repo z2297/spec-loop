@@ -108,6 +108,24 @@ suggestion") helps, but the verifier is the same agent that must act on it.
 
 ## Medium leverage — cost and latency
 
+### 4b. Parallel sdd-implementers ("independent task lanes") — evaluated, NO-GO
+
+🔴 Assessed 2026-07-29 during the slice cost optimization; recorded so it isn't
+re-litigated from scratch.
+
+Shared-worktree lanes are disqualified by the **git index**, not by tests: the
+index is per-worktree and shared, so implementer A staging files while
+implementer B runs `git commit` silently snapshots A's staged files into B's
+commit — per-task `BASE..HEAD` review packages and the progress ledger corrupt
+without any error. `index.lock` contention and build-output/test-fixture races
+(`obj/bin`, `.next`, `target`, ports) compound it. This holds even for perfectly
+file-disjoint tasks. The only viable future shape is **per-lane sub-worktrees**
+(own index/branch per lane, merged back into the slice branch) — cheap to
+provision now that worktree setup is attested/fast-pathed, but it adds an
+in-slice merge step, reviewer resequencing, and a plan-schema lane marker; not
+worth it while slices are already cut to "smallest shippable" with few, coupled
+tasks. Revisit only if per-slice task counts grow.
+
 ### 5. Risk-tier-scaled council and effort
 
 ✅ **Implemented 2026-07-07** (`review-depth-map` tier → council composition, `council="..."` plan-header field, `council_contracts.py aggregate --expect` fail-closed completeness check)

@@ -124,11 +124,22 @@ whose marker is absent: `package.json` → `npm install`; `Cargo.toml` → `carg
 `requirements.txt` → `pip install -r requirements.txt`; `pyproject.toml` → `poetry install`;
 `go.mod` → `go mod download`.
 
+**Node dependency fast path** (before a cold install): if the primary checkout (the
+parent of `git rev-parse --git-common-dir`) has an installed `node_modules` and a
+**byte-identical lockfile** (`package-lock.json` / `pnpm-lock.yaml` / `yarn.lock` —
+compare content, not mtime), copy the dependency dir into the worktree first (`cp -c -R`
+on macOS/APFS clones cheaply; plain `cp -R` elsewhere), **then still run the ecosystem's
+install command** — the reconciling install takes seconds and is the verification that
+the copy is sound. Any copy failure or lockfile mismatch → delete the partial copy and
+cold-install (fail closed). Go/Cargo/pip already share global caches — no copy needed;
+Python virtualenvs embed absolute paths and are **never** copied.
+
 ## Step 3: Verify a clean baseline
 
 Run the project's test suite (`npm test` / `cargo test` / `pytest` / `go test ./...`)
 **before you start work**, so a later failure is attributable to your change rather than a
-pre-existing one.
+pre-existing one. (Inside a spec-loop run, a matching controller `baseline_attestation`
+satisfies this step without a run — see the pinned section below.)
 
 - **If tests fail:** report the failures and ask whether to proceed or investigate. Do not
   build on a red baseline.
@@ -155,9 +166,14 @@ planning, or edits. The controller owns the policy; this skill owns the mechanic
   during a run is owned by `spec-loop:escalation-gate`, not by this skill's Step 0 question.
 - **`.worktrees/` must be gitignored** — this skill's Step 1b `git check-ignore` step (add
   to `.gitignore` + commit if missing) is exactly what guarantees that invariant for the run.
-- **Verified clean baseline is mandatory** (Steps 2–3). If the baseline is already broken
-  before the worker changes anything, that is a pre-existing condition: the worker runs
-  `escalation-gate` and returns `NEEDS_DECISION` rather than building on a red baseline.
+- **Verified clean baseline is mandatory** (Steps 2–3) — satisfied either by running the
+  suite or by a controller `baseline_attestation` whose `tree_sha` equals the worktree
+  HEAD's tree (`git rev-parse HEAD^{tree}`; see
+  `spec-loop:verification-before-completion` §Scoped vs. full verification, tree
+  identity); mismatched or absent attestation → run the suite. If the baseline is
+  already broken before the worker changes anything, that is a pre-existing condition:
+  the worker runs `escalation-gate` and returns `NEEDS_DECISION` rather than building on
+  a red baseline.
 - **Ephemeral isolation detail, not deliverables.** These per-slice branches/worktrees are
   owned by the controller: it merges each into the singular integration branch and deletes
   it (they survive only in `--per-slice-pr` mode). Stale worktrees from an aborted run are

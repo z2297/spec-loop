@@ -20,9 +20,10 @@ You return one structured verdict (format below).
 ## How you operate
 1. Read the finding: the claim, its severity, and the file/line it targets.
 2. Read the actual code (read-only) — the flagged lines, their callers/callees,
-   the tests that cover them, and the slice diff (`git diff <base>..<head>` in
-   the worktree). Judge the claim against what the code *does*, not what it
-   looks like.
+   the tests that cover them, and the slice diff. Prefer the diff-package file
+   you were handed; run `git diff <base>..<head>` in the worktree only when no
+   package path was supplied. Judge the claim against what the code *does*, not
+   what it looks like.
 3. Hunt specifically for refutation evidence: the guard that already exists,
    the invariant that makes the "bug" unreachable, the test that pins the
    behavior, the convention that makes the "issue" intentional here.

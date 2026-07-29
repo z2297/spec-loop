@@ -2,7 +2,7 @@
 name: pr-test-analyzer
 description: "Judges the test-coverage quality and completeness of a PR diff — behavioral coverage over line coverage, without being pedantic about 100%. Dispatched by the spec-loop:review-pr skill's `tests` aspect (auto-selected when the diff touches test files or adds logic that needs coverage; forced in `all`/`exhaustive`) to flag critical test gaps, weak or brittle tests, and the negative/edge cases a change left unguarded. Read-only and advisory; never edits, posts, or merges."
 tools: Read, Grep, Glob, Bash
-model: inherit
+model: sonnet
 color: cyan
 ---
 
